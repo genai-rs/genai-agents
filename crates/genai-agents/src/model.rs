@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::error::ModelError;
-use crate::item::Item;
+use crate::item::{Item, Origin};
 use crate::platform::{BoxStream, MaybeSend, MaybeSync};
 use crate::tools::{CustomFormat, ToolKey};
 
@@ -90,7 +90,7 @@ impl<'a> ModelStream<'a> {
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ModelRequest<'a> {
-    /// The conversation, [repaired](crate::Conversation::normalize) for the model.
+    /// The conversation, as [projected](crate::Conversation::for_request) for the model.
     pub items: &'a [Item],
     /// The tools to advertise.
     pub tools: &'a [ToolDefinition],
@@ -98,6 +98,8 @@ pub struct ModelRequest<'a> {
     pub parallel_tool_calls: bool,
     /// The prompt cache key, the same for every request of a runner.
     pub prompt_cache_key: Option<&'a str>,
+    /// The settings of the request: the reasoning level, the output limit.
+    pub settings: ModelSettings,
 }
 
 impl<'a> ModelRequest<'a> {
@@ -109,7 +111,15 @@ impl<'a> ModelRequest<'a> {
             tools: &[],
             parallel_tool_calls: true,
             prompt_cache_key: None,
+            settings: ModelSettings::default(),
         }
+    }
+
+    /// The same request, with these settings.
+    #[must_use]
+    pub fn with_settings(mut self, settings: ModelSettings) -> Self {
+        self.settings = settings;
+        self
     }
 
     /// The same request, with these tools.
@@ -188,18 +198,172 @@ impl ToolDefinition {
     }
 }
 
+/// How hard a model reasons before it answers, on one scale for every provider; each provider
+/// maps it to its own values (OpenAI's `reasoning.effort` / `reasoning_effort`).
+///
+/// New levels may be added in minor releases: match with a wildcard arm.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ReasoningLevel {
+    /// No reasoning, where the model allows it.
+    Off,
+    /// The least reasoning.
+    Minimal,
+    /// Little reasoning.
+    Low,
+    /// Some reasoning.
+    Medium,
+    /// Much reasoning.
+    High,
+    /// The most reasoning.
+    XHigh,
+}
+
+impl ReasoningLevel {
+    /// The level's name: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
+/// The settings of a request that every provider understands. A provider leaves out what its
+/// model does not take; settings of its own stay with the provider (such as a request
+/// template).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct ModelSettings {
+    /// How hard the model reasons; `None` leaves it to the provider.
+    pub reasoning: Option<ReasoningLevel>,
+    /// The most tokens the model may write in one response; `None` leaves it to the provider.
+    pub max_output_tokens: Option<u32>,
+}
+
+impl ModelSettings {
+    /// No settings: the provider's defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The same settings, with this reasoning level.
+    #[must_use]
+    pub fn with_reasoning(mut self, level: ReasoningLevel) -> Self {
+        self.reasoning = Some(level);
+        self
+    }
+
+    /// The same settings, with this output limit.
+    #[must_use]
+    pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
+        self.max_output_tokens = Some(tokens);
+        self
+    }
+}
+
+/// Which call ids a model takes. The [projection](crate::Conversation::for_request) rewrites the
+/// others, the same way every time, in calls and their outputs alike.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CallIds {
+    /// Any id (OpenAI).
+    #[default]
+    Any,
+    /// At most `max_len` ASCII letters, digits, `_` and `-` (Anthropic: 64).
+    Restricted {
+        /// The longest id.
+        max_len: usize,
+    },
+}
+
+impl CallIds {
+    /// Whether the model takes `id` as it is.
+    #[must_use]
+    pub fn accepts(self, id: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Restricted { max_len } => {
+                !id.is_empty()
+                    && id.len() <= max_len
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            }
+        }
+    }
+
+    /// `id` as the model takes it: unchanged when it [accepts](Self::accepts) it, else the
+    /// allowed characters (others become `_`), cut to fit a `_` and a hash of the whole id, so
+    /// that two ids stay apart.
+    #[must_use]
+    pub fn rewrite(self, id: &str) -> String {
+        let Self::Restricted { max_len } = self else {
+            return id.to_string();
+        };
+        if self.accepts(id) {
+            return id.to_string();
+        }
+        let hash = format!("{:016x}", fnv1a(id.as_bytes()));
+        let keep = max_len.saturating_sub(hash.len() + 1);
+        let mut out: String = id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(keep)
+            .collect();
+        if !out.is_empty() {
+            out.push('_');
+        }
+        out.push_str(&hash);
+        out.truncate(max_len.max(1));
+        out
+    }
+}
+
+/// The 64-bit FNV-1a hash: small, stable across versions and platforms.
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// What the model is and can take, which changes what the runner sends it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[allow(clippy::struct_excessive_bools)] // independent capabilities
 pub struct ModelInfo {
+    /// The model, as its items record it ([`ItemMeta::origin`](crate::ItemMeta::origin)). The
+    /// [projection](crate::Conversation::for_request) sends reasoning and provider state only
+    /// to the model that wrote them; `None` keeps every item of the same provider.
+    pub origin: Option<Origin>,
+    /// Which call ids the model takes; the projection rewrites the others. Default
+    /// [`CallIds::Any`].
+    pub call_ids: CallIds,
     /// The tokens the model reads at most (input and output together), when known.
     pub context_window: Option<u32>,
     /// The tokens the model writes at most in one response, when known.
     pub max_output_tokens: Option<u32>,
-    /// Whether the model accepts images. When it does not,
-    /// [`Conversation::normalize`](crate::Conversation::normalize) replaces the images of the
-    /// history (in messages and tool outputs) with a short text. Default `true`.
+    /// Whether the model accepts images. When it does not, the
+    /// [projection](crate::Conversation::for_request) replaces the images of the history (in
+    /// messages and tool outputs) with a short text. Default `true`.
     pub images: bool,
     /// Whether tool outputs may hold images and files. When they may not, an output with them is
     /// sent as a failure. Default `true`.
@@ -222,6 +386,8 @@ pub struct ModelInfo {
 impl Default for ModelInfo {
     fn default() -> Self {
         Self {
+            origin: None,
+            call_ids: CallIds::Any,
             context_window: None,
             max_output_tokens: None,
             images: true,
@@ -240,6 +406,20 @@ impl ModelInfo {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The model, as its items record it.
+    #[must_use]
+    pub fn with_origin(mut self, origin: Origin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// Which call ids the model takes.
+    #[must_use]
+    pub fn with_call_ids(mut self, call_ids: CallIds) -> Self {
+        self.call_ids = call_ids;
+        self
     }
 
     /// The model's context window, in tokens.

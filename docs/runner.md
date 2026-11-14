@@ -89,10 +89,15 @@ tokens (`usage`), why the model stopped (`stop`) and the rate limits.
 A provider implements `Model`: it turns a `ModelRequest` (the conversation, the tools, a few settings) into its own
 request, and returns the response as a stream of `ModelEvent`s: text and reasoning deltas, each output item once
 it is done (`ItemDone`, so the runner can start a call at once), and `Completed` with the usage and why the model
-stopped. Its `info()` (`ModelInfo`) says what it takes: images, rich tool outputs, custom tools, namespaces, a tool
-search of its own, reasoning, its context window. A failure is a `ModelError`, with a `RetryClass`, the delay the
+stopped. Its `info()` (`ModelInfo`) says what it is (its `origin`: the API, provider and model its items record)
+and what it takes: images, rich tool outputs, custom tools, namespaces, a tool search of its own, reasoning, its
+context window, which call ids (`CallIds`). A failure is a `ModelError`, with a `RetryClass`, the delay the
 server asked for, whether it happened before the body, and an `ErrorKind` (context overflow, unknown model,
 authentication, rate limit, …).
+
+A request also carries `ModelSettings`, which every provider understands: a reasoning level on one scale
+(`ReasoningLevel::Off` to `XHigh`, which each provider maps to its own values) and an output limit. Set them for
+every request of a runner with `RunConfig::with_model_settings`.
 
 With the `testing` feature, `genai_agents::testing::ScriptedModel` answers each request as a script says and
 records the requests, for tests of your own.
@@ -130,12 +135,25 @@ A `Conversation` holds `Item`s, independent of the provider: messages (`push_use
 reasoning, and items only their provider understands (hosted tools). It is `Serialize` and `Deserialize`: store it,
 and run on it again later.
 
-Before every request, retries included, the runner calls `normalize`, which makes any history one a model accepts:
+Items the model wrote record where they came from (`ItemMeta`): the model (`origin`), the response that produced
+them in the conversation (`turn`, see `next_turn`), and whether they were cut off (`interrupted`). Messages the
+application injects (instructions, a note) can say so (`Message::injected`).
 
+The runner keeps the conversation as it came and sends each request, retries included, a projection of it for its
+model: `for_request(&info)` (or `project`, with a report of what it changed). The conversation itself does not
+change, and the same conversation gives the same projection, byte for byte, so the prompt cache holds:
+
+- items cut off are left out: the partial text of a cancelled or failed response (a call cut off stays, with its
+  answer);
+- reasoning and provider items of another model are left out, and so is the provider state of its calls: only the
+  model that wrote them can read them (an item without an origin is kept when its provider is the model's);
 - a call without an output is answered `"aborted"` (after the call and the calls and outputs that directly follow
-  it);
+  it), with an id derived from the call id;
 - an output whose call is not earlier in the conversation is dropped;
-- when the model takes no images, images in messages and tool outputs become a short text.
+- when the model takes no images, images in messages and tool outputs become a short text;
+- call ids the model does not take (`ModelInfo::call_ids`) are rewritten, the same way in calls and outputs.
+
+`normalize(&info)` repairs the conversation itself the same way (the answers, orphans and images):
 
 ```rust
 use genai_agents::{Conversation, ModelInfo, ToolCall, ToolOutput};
@@ -150,12 +168,18 @@ conversation.push_output(&ToolOutput::new(&paris, r#"{"sky":"sun"}"#, true));
 let stray = ToolCall::function("call_9", "get_weather", "{}");
 conversation.push_output(&ToolOutput::new(&stray, "{}", true));
 
-let report = conversation.normalize(ModelInfo::default());
+// What a request gets; the conversation stays as it is.
+let (request, report) = conversation.project(&ModelInfo::default());
+assert_eq!(report.normalized.aborted, ["call_1"]);
+assert_eq!(request.len(), 5);
+assert_eq!(conversation.len(), 5);
+
+let report = conversation.normalize(&ModelInfo::default());
 assert_eq!(report.aborted, ["call_1"]);
 assert_eq!(report.orphans, ["call_9"]);
 assert!(conversation.unanswered_calls().is_empty());
 // Idempotent: a second pass changes nothing.
-assert!(conversation.normalize(ModelInfo::default()).is_clean());
+assert!(conversation.normalize(&ModelInfo::default()).is_clean());
 ```
 
 `remove(index)` removes an item with its partner (a call with its outputs, an output with its call).
@@ -174,14 +198,25 @@ assert!(conversation.normalize(ModelInfo::default()).is_clean());
 - `parallel_tool_calls` when there are tools.
 
 `with_store(true)` stores the responses (and sends the items with their ids); `with_stream(false)` waits for whole
-responses. The requests go through the client's HTTP stack (its retries, provider, credentials and layers); the
-client's interceptors are not called.
+responses. The requests go the way of the client's own calls: through its interceptors (Langfuse's, say) and its
+HTTP stack (its retries, provider, credentials and layers).
+
+The request's settings override the template's: `reasoning.effort` (`ReasoningLevel::Off` is `none`) and
+`max_output_tokens` on the Responses API; `reasoning_effort` and the output limit on Chat Completions.
+"OpenAI-compatible" differs per server, so `OpenAiChat` follows a `Compat`: whether the server takes `developer`
+messages (else they are sent as `system` ones), `reasoning_effort`, `store`, the usage in streams, which field holds
+the output limit (`max_tokens` or `max_completion_tokens`), and whether tool messages name their tool. By default
+it is the preset of the client's provider (`Compat::for_provider`); `with_compat` sets another.
 
 ## Running the calls
 
 Each call is answered with `ToolRegistry::answer_call`: failures the model can act on become its answer, a fatal
-one ends the run with `Error::Tool` (the answers of the calls that finished are kept; the others are answered
-`"aborted"` at the next `normalize`).
+one ends the run with `Error::Tool` (the answers of the calls that finished are kept; the next request's projection
+answers the others `"aborted"`).
+
+A call the response stopped in the middle of is not run: one the provider marks as cut off
+(`ItemMeta::interrupted`), and, when a response stops at the output limit (`StopReason::Length`), the calls that
+had not started yet. Their answer says so (`CUT_OFF_OUTPUT`).
 
 The calls go through a first-in, first-out read/write gate: a call of a tool whose `supports_parallel()` is true
 starts while only such calls run; any other call waits until everything before it finished, and everything after
@@ -195,7 +230,8 @@ still calls tools: `RunStop::MaxIterations`, with every call answered. Run again
 
 A `CancellationSignal` stops a run at its next await: the request or stream is dropped, the running calls are
 dropped and answered `"aborted by user after 1.2s"`, the calls not started yet `"aborted"`, and the run returns
-`RunStop::Cancelled`.
+`RunStop::Cancelled`. The text the model had written so far is kept as an assistant message marked as cut off
+(`ItemMeta::interrupted`), and in the outcome's text; the next request does not send it.
 
 ## Retries
 

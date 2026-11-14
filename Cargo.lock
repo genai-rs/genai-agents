@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "genai-agents"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "genai-agents",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "genai-agents-openai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1160,9 +1160,9 @@ dependencies = [
 
 [[package]]
 name = "openai-ergonomic"
-version = "0.24.0"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdff5ad50e43ba840205d51e1216f137ce1c2abb1f17ceb7a56460796dfcfb4e"
+checksum = "349fe3cf86e05fa0a5d4867fe7314724d476870bd8fd8b73a2f8678fdccc1e39"
 dependencies = [
  "base64",
  "bytes",

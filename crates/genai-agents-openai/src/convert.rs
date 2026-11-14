@@ -246,6 +246,9 @@ pub fn output_item(value: Value) -> Item {
             };
             call.namespace = optional(&value, "namespace");
             call.id = optional(&value, "id");
+            // A call the response stopped in the middle of (at the output limit): not run.
+            call.meta.interrupted =
+                value.get("status").and_then(Value::as_str) == Some("incomplete");
             Item::ToolCall(call)
         }
         "reasoning" => {
@@ -378,7 +381,14 @@ pub fn chat_tool(definition: &ToolDefinition) -> Option<Value> {
 /// The conversation as chat messages: messages by role; consecutive calls (with the assistant
 /// text before them) as one assistant message with tool calls; outputs as tool messages (images
 /// and files as a short text). Reasoning and provider items are left out.
-pub fn chat_messages(items: &[Item]) -> Vec<Value> {
+pub fn chat_messages(items: &[Item], compat: &crate::Compat) -> Vec<Value> {
+    let names: std::collections::BTreeMap<&str, &str> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::ToolCall(call) => Some((call.call_id.as_str(), call.name.as_str())),
+            _ => None,
+        })
+        .collect();
     let mut messages = Vec::new();
     let mut assistant: Option<(Option<String>, Vec<Value>)> = None;
     let flush = |assistant: &mut Option<(Option<String>, Vec<Value>)>,
@@ -402,7 +412,10 @@ pub fn chat_messages(items: &[Item]) -> Vec<Value> {
             }
             Item::Message(message) => {
                 flush(&mut assistant, &mut messages);
-                let role = role_name(message.role);
+                let role = match message.role {
+                    Role::Developer if !compat.supports_developer_role => "system",
+                    role => role_name(role),
+                };
                 messages.push(json!({"role": role, "content": chat_content(message)}));
             }
             Item::ToolCall(call) => {
@@ -426,11 +439,17 @@ pub fn chat_messages(items: &[Item]) -> Vec<Value> {
             }
             Item::ToolOutput(output) if !matches!(output.kind, ToolKind::Other(_)) => {
                 flush(&mut assistant, &mut messages);
-                messages.push(json!({
+                let mut message = json!({
                     "role": "tool",
                     "tool_call_id": output.call_id,
                     "content": chat_text(&output.body),
-                }));
+                });
+                if compat.requires_tool_result_name {
+                    if let Some(name) = names.get(output.call_id.as_str()) {
+                        message["name"] = Value::String((*name).to_string());
+                    }
+                }
+                messages.push(message);
             }
             _ => {}
         }
@@ -686,7 +705,7 @@ mod tests {
             )),
             Item::Reasoning(Reasoning::new(PROVIDER)),
         ];
-        let messages = chat_messages(&items);
+        let messages = chat_messages(&items, &crate::Compat::openai());
         assert_eq!(messages.len(), 5);
         assert_eq!(
             messages[0],
@@ -715,7 +734,7 @@ mod tests {
             ],
         ))];
         assert_eq!(
-            chat_messages(&items)[0]["content"][1],
+            chat_messages(&items, &crate::Compat::openai())[0]["content"][1],
             json!({"type": "image_url", "image_url": {"url": "https://x/z.png"}})
         );
     }

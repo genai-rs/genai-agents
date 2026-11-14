@@ -3,8 +3,9 @@
 //! model provider: a provider crate (such as
 //! [genai-agents-openai](https://docs.rs/genai-agents-openai)) implements [`Model`].
 //!
-//! - [`Conversation`]: the history, as provider-independent [`Item`]s; `Serialize` and
-//!   `Deserialize`, and repaired before every request ([`Conversation::normalize`]).
+//! - [`Conversation`]: the history, as provider-independent [`Item`]s that record where they came
+//!   from ([`ItemMeta`]); `Serialize` and `Deserialize`, and projected for the model before every
+//!   request ([`Conversation::for_request`]).
 //! - [`tools`]: typed tools ([`FunctionTool`](tools::FunctionTool),
 //!   [`RichTool`](tools::RichTool), [`CustomTool`](tools::CustomTool), dynamic tools), their
 //!   [`ToolRegistry`], and when the model sees them
@@ -96,20 +97,20 @@ pub mod runner;
 pub mod testing;
 pub mod tools;
 
-pub use conversation::{Conversation, NormalizeReport, IMAGE_OMITTED};
+pub use conversation::{Conversation, NormalizeReport, ProjectionReport, IMAGE_OMITTED};
 pub use error::{BoxError, Error, ErrorKind, ModelError, Result, RetryClass};
 pub use item::{
-    Content, ImageDetail, Item, Message, ProviderItem, Reasoning, Role, ToolCall, ToolKind,
-    ToolOutput, ToolOutputBody, ABORTED_OUTPUT,
+    Content, ImageDetail, Item, ItemMeta, Message, Origin, ProviderItem, Reasoning, Role, ToolCall,
+    ToolKind, ToolOutput, ToolOutputBody, ABORTED_OUTPUT,
 };
 pub use model::{
-    Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelStream, RateLimitWindow,
-    RateLimits, StopReason, ToolDefinition, Usage,
+    CallIds, Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelSettings, ModelStream,
+    RateLimitWindow, RateLimits, ReasoningLevel, StopReason, ToolDefinition, Usage,
 };
 pub use platform::{BoxFuture, BoxStream, MaybeSend, MaybeSync};
 pub use runner::{
     CancellationSignal, PromptCacheKey, RetryConfig, RunConfig, RunEvent, RunOutcome, RunStop,
-    Runner, ToolSearchConfig, TurnRecord, TOOL_SEARCH,
+    Runner, ToolSearchConfig, TurnRecord, CUT_OFF_OUTPUT, TOOL_SEARCH,
 };
 pub use tools::ToolRegistry;
 

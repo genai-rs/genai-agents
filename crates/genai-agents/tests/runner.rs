@@ -660,7 +660,7 @@ async fn a_fatal_tool_error_ends_the_run() {
     assert!(matches!(error, Error::Tool(_)), "{error:?}");
     // The answer of the call that finished is kept; the other is answered by normalize.
     assert_eq!(conversation.unanswered_calls().len(), 1);
-    let report = conversation.normalize(ModelInfo::default());
+    let report = conversation.normalize(&ModelInfo::default());
     assert_eq!(report.aborted, ["b"]);
 }
 

@@ -115,6 +115,10 @@ long it was.
 A tool whose output holds content from outside the application (a web page, an email) says so with
 `untrusted_output`: its answers are marked `untrusted`, which the runner records.
 
+What only the application should see goes into the answer's `details`, which the model never gets: a function tool
+fills it from its output with `details` (the full data behind a short answer, a diff to show), and the application
+can set it on any answer (`ToolOutput::with_details`).
+
 ## Rich, custom and dynamic tools
 
 - `RichTool` returns a `ToolOutputBody`: text, or content parts (`Content::text`, `Content::image_url`,

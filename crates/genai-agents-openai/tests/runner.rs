@@ -19,11 +19,12 @@ use bytes::Bytes;
 use futures::StreamExt;
 use genai_agents::tools::{Exposure, FunctionTool, ToolKey, ToolRegistry};
 use genai_agents::{
-    CancellationSignal, Conversation, Error, Item, Message, ModelEvent, ModelInfo, PromptCacheKey,
-    Result, RetryConfig, Role, RunConfig, RunEvent, RunStop, Runner, StopReason, ToolCall,
-    ToolOutput, Usage,
+    CancellationSignal, Conversation, Error, Item, ItemMeta, Message, Model, ModelEvent, ModelInfo,
+    ModelSettings, Origin, PromptCacheKey, Reasoning, ReasoningLevel, Result, RetryConfig, Role,
+    RunConfig, RunEvent, RunStop, Runner, StopReason, ToolCall, ToolOutput, ToolOutputBody, Usage,
+    CUT_OFF_OUTPUT,
 };
-use genai_agents_openai::{OpenAiChat, OpenAiResponses};
+use genai_agents_openai::{Compat, OpenAiChat, OpenAiResponses, PROVIDER, RESPONSES_API};
 use openai_ergonomic::{ChatCompletionBuilder, Client, Config, ResponsesBuilder};
 use serde_json::{json, Value};
 use timvw_rust_runtime::{Body, BoxError};
@@ -98,6 +99,15 @@ type Seen = Arc<Mutex<Vec<Value>>>;
 /// A client whose HTTP service answers request `n` with `script(n, body)` and records the JSON
 /// bodies. The client does not retry: the runner does.
 fn scripted(script: impl Fn(usize, &Value) -> Reply + Send + Sync + 'static) -> (Client, Seen) {
+    let (config, seen) = scripted_config(script);
+    (Client::builder(config).unwrap().build(), seen)
+}
+
+/// The configuration of [`scripted`]'s client, to build a client of one's own (with an
+/// interceptor, say).
+fn scripted_config(
+    script: impl Fn(usize, &Value) -> Reply + Send + Sync + 'static,
+) -> (Config, Seen) {
     let seen: Seen = Arc::default();
     let log = seen.clone();
     let script = Arc::new(script);
@@ -133,7 +143,7 @@ fn scripted(script: impl Fn(usize, &Value) -> Reply + Send + Sync + 'static) -> 
         .max_retries(0)
         .http_client(timvw_rust_runtime::Client::from_service(service))
         .build();
-    (Client::builder(config).unwrap().build(), seen)
+    (config, seen)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1018,7 +1028,7 @@ async fn a_fatal_tool_error_ends_the_run() {
     let error = runner.run(&mut conversation).await.unwrap_err();
     assert!(matches!(error, Error::Tool(_)), "{error:?}");
     assert_eq!(conversation.unanswered_calls().len(), 1);
-    let report = conversation.normalize(ModelInfo::default());
+    let report = conversation.normalize(&ModelInfo::default());
     assert_eq!(report.aborted, ["b"]);
 }
 
@@ -1064,4 +1074,271 @@ fn the_run_future_is_send() {
     );
     let future = runner.run_with(&mut conversation, &cancel, |_| {});
     assert_send(&future);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The client's interceptors, request settings, item origins, `Compat`, cut-off completions and
+// details for the application.
+
+/// Records the operations the interceptor hooks saw.
+#[derive(Clone, Default)]
+struct Hooks(Arc<Mutex<Vec<String>>>);
+
+impl openai_ergonomic::Interceptor for Hooks {
+    async fn before_request(
+        &self,
+        ctx: &mut openai_ergonomic::BeforeRequestContext<'_>,
+    ) -> openai_ergonomic::Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("before {} {}", ctx.operation, ctx.model));
+        Ok(())
+    }
+
+    async fn after_response(
+        &self,
+        ctx: &openai_ergonomic::AfterResponseContext<'_>,
+    ) -> openai_ergonomic::Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("after {} {:?}", ctx.operation, ctx.output_tokens));
+        Ok(())
+    }
+
+    async fn on_stream_terminal(
+        &self,
+        ctx: &openai_ergonomic::StreamTerminalContext<'_>,
+    ) -> openai_ergonomic::Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("stream end {:?}", ctx.summary.output_tokens));
+        Ok(())
+    }
+}
+
+fn client_with(config: Config, hooks: &Hooks) -> Client {
+    Client::builder(config)
+        .unwrap()
+        .with_interceptor(Box::new(hooks.clone()))
+        .build()
+}
+
+#[tokio::test]
+async fn requests_go_through_the_clients_interceptors_with_the_settings() {
+    let (config, seen) = scripted_config(|index, _| {
+        if index == 0 {
+            Reply::sse(&events(
+                "resp_1",
+                &[call("c1", "get_weather", &json!({"city": "Ghent"}))],
+            ))
+        } else {
+            Reply::sse(&events("resp_2", &[message("Rain.")]))
+        }
+    });
+    let hooks = Hooks::default();
+    let model = OpenAiResponses::new(
+        client_with(config, &hooks),
+        ResponsesBuilder::new("gpt-5-mini"),
+    );
+    assert_eq!(
+        model.info().origin,
+        Some(Origin::new(RESPONSES_API, PROVIDER, "gpt-5-mini"))
+    );
+    let mut runner = Runner::new(model, weather_tools()).with_config(
+        RunConfig::new().with_model_settings(
+            ModelSettings::new()
+                .with_reasoning(ReasoningLevel::Off)
+                .with_max_output_tokens(300),
+        ),
+    );
+    let mut conversation = Conversation::user("Weather in Ghent?");
+    runner.run(&mut conversation).await.unwrap();
+
+    let bodies = seen.lock().unwrap().clone();
+    assert_eq!(bodies[0]["reasoning"]["effort"], "none");
+    assert_eq!(bodies[0]["max_output_tokens"], 300);
+    // The interceptors saw both requests and the end of both streams.
+    for _ in 0..50 {
+        if hooks.0.lock().unwrap().len() >= 4 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The stream hooks run on a task of their own: compare without the order.
+    let mut seen_hooks = hooks.0.lock().unwrap().clone();
+    seen_hooks.sort();
+    assert_eq!(
+        seen_hooks,
+        [
+            "before responses gpt-5-mini",
+            "before responses gpt-5-mini",
+            "stream end Some(5)",
+            "stream end Some(5)"
+        ]
+    );
+    // The model's items record it as their origin.
+    let origin = conversation.calls()[0].meta.origin.clone().unwrap();
+    assert_eq!(origin.model, "gpt-5-mini");
+    assert_eq!(origin.api, RESPONSES_API);
+}
+
+#[tokio::test]
+async fn reasoning_of_another_model_is_not_sent() {
+    let (client, seen) = scripted(|_, _| Reply::sse(&events("resp_1", &[message("Ok.")])));
+    let model = OpenAiResponses::new(client, ResponsesBuilder::new("gpt-5-mini"))
+        .with_info(ModelInfo::new().with_reasoning(true));
+    let mut runner = Runner::new(model, ToolRegistry::new());
+    let mut conversation = Conversation::user("Think.");
+    conversation.push(
+        Reasoning::new(PROVIDER)
+            .with_encrypted_content("theirs")
+            .with_meta(ItemMeta::new().with_origin(Origin::new(RESPONSES_API, PROVIDER, "gpt-5"))),
+    );
+    conversation.push(
+        Reasoning::new(PROVIDER)
+            .with_encrypted_content("ours")
+            .with_meta(ItemMeta::new().with_origin(Origin::new(
+                RESPONSES_API,
+                PROVIDER,
+                "gpt-5-mini",
+            ))),
+    );
+    runner.run(&mut conversation).await.unwrap();
+    let body = seen.lock().unwrap()[0].clone();
+    let reasoning = input_of(&body, "reasoning");
+    assert_eq!(reasoning.len(), 1);
+    assert_eq!(reasoning[0]["encrypted_content"], "ours");
+}
+
+/// Counts its runs; reports the city in its details.
+struct Counted(Arc<Mutex<usize>>);
+
+impl FunctionTool for Counted {
+    type Input = Value;
+    type Output = Value;
+    fn name(&self) -> &str {
+        "get_weather"
+    }
+    fn description(&self) -> &str {
+        "Get the current weather of a city."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object", "properties": {"city": {"type": "string"}}})
+    }
+    async fn execute(&self, input: Value) -> Result<Value> {
+        *self.0.lock().unwrap() += 1;
+        Ok(json!({"city": input["city"], "temperature": 12}))
+    }
+    fn details(&self, _output: &Value) -> Option<Value> {
+        Some(json!({"secret": "for the application only"}))
+    }
+}
+
+#[tokio::test]
+async fn chat_requests_follow_the_servers_compat() {
+    // Two runs: a call, then the answer, each.
+    let (client, seen) = scripted(|index, _| {
+        if index % 2 == 0 {
+            Reply::json(&chat_completion(
+                None,
+                &[("c1", "get_weather", json!({"city": "Ghent"}))],
+            ))
+        } else {
+            Reply::json(&chat_completion(Some("Rain."), &[]))
+        }
+    });
+    let runs = Arc::new(Mutex::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Counted(Arc::clone(&runs))).unwrap();
+    let template = ChatCompletionBuilder::new("local-model");
+    // The client's provider is OpenAI's (with another base URL): its preset.
+    assert_eq!(
+        *OpenAiChat::new(client.clone(), template.clone()).compat(),
+        Compat::openai()
+    );
+    // A server that takes only what every compatible server takes.
+    let model = OpenAiChat::new(client.clone(), template.clone()).with_compat(Compat::cautious());
+    let settings = ModelSettings::new()
+        .with_reasoning(ReasoningLevel::Low)
+        .with_max_output_tokens(200);
+    let mut runner =
+        Runner::new(model, tools).with_config(RunConfig::new().with_model_settings(settings));
+    let mut conversation = Conversation::new();
+    conversation.push(Message::text(Role::Developer, "Use metric units."));
+    conversation.push_user("Weather in Ghent?");
+    runner.run(&mut conversation).await.unwrap();
+
+    let bodies = seen.lock().unwrap().clone();
+    assert_eq!(bodies[0]["messages"][0]["role"], "system");
+    assert_eq!(bodies[0]["max_tokens"], 200);
+    assert!(bodies[0].get("max_completion_tokens").is_none());
+    assert!(bodies[0].get("reasoning_effort").is_none());
+    // The tool's details stay with the application.
+    let tool_message = &bodies[1]["messages"][3];
+    assert_eq!(tool_message["role"], "tool");
+    assert!(tool_message.get("name").is_none());
+    assert!(!tool_message
+        .to_string()
+        .contains("for the application only"));
+    let answer = conversation
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            Item::ToolOutput(output) => Some(output.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        answer.details,
+        Some(json!({"secret": "for the application only"}))
+    );
+
+    // OpenAI's own: developer messages, reasoning_effort, max_completion_tokens; and a server
+    // that wants the tool's name on tool messages.
+    let mut tools = ToolRegistry::new();
+    tools.register(Counted(Arc::clone(&runs))).unwrap();
+    let model =
+        OpenAiChat::new(client, template).with_compat(Compat::openai().with_tool_result_name(true));
+    let mut runner =
+        Runner::new(model, tools).with_config(RunConfig::new().with_model_settings(settings));
+    let mut conversation = Conversation::new();
+    conversation.push(Message::text(Role::Developer, "Use metric units."));
+    conversation.push_user("Weather in Ghent?");
+    runner.run(&mut conversation).await.unwrap();
+    let bodies = seen.lock().unwrap().clone();
+    assert_eq!(bodies[2]["messages"][0]["role"], "developer");
+    assert_eq!(bodies[2]["reasoning_effort"], "low");
+    assert_eq!(bodies[2]["max_completion_tokens"], 200);
+    assert_eq!(bodies[3]["messages"][3]["name"], "get_weather");
+}
+
+#[tokio::test]
+async fn calls_of_a_completion_cut_off_at_the_output_limit_are_not_run() {
+    let (client, _) = scripted(|_, _| {
+        let mut completion = chat_completion(None, &[("c1", "get_weather", json!({"city": "Gh"}))]);
+        completion["choices"][0]["finish_reason"] = json!("length");
+        Reply::json(&completion)
+    });
+    let runs = Arc::new(Mutex::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Counted(Arc::clone(&runs))).unwrap();
+    let model = OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-4.1-mini"));
+    let mut runner = Runner::new(model, tools);
+    let mut conversation = Conversation::user("Weather in Ghent?");
+    let outcome = runner.run(&mut conversation).await.unwrap();
+    assert!(matches!(outcome.stop, RunStop::Incomplete { .. }));
+    assert_eq!(*runs.lock().unwrap(), 0);
+    let answer = conversation
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            Item::ToolOutput(output) => Some(output.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!answer.success);
+    assert_eq!(answer.body, ToolOutputBody::text(CUT_OFF_OUTPUT));
 }

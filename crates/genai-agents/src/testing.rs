@@ -34,8 +34,8 @@ use futures::StreamExt;
 use crate::error::ModelError;
 use crate::item::{Item, ToolOutput};
 use crate::model::{
-    Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelStream, RateLimitWindow,
-    RateLimits, ToolDefinition, Usage,
+    Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelSettings, ModelStream,
+    RateLimitWindow, RateLimits, ToolDefinition, Usage,
 };
 use crate::platform::{sleep, MaybeSend};
 
@@ -141,6 +141,8 @@ pub struct SeenRequest {
     pub parallel_tool_calls: bool,
     /// The prompt cache key.
     pub prompt_cache_key: Option<String>,
+    /// The settings.
+    pub settings: ModelSettings,
 }
 
 impl SeenRequest {
@@ -244,7 +246,7 @@ impl ScriptedModel {
 
 impl Model for ScriptedModel {
     fn info(&self) -> ModelInfo {
-        self.info
+        self.info.clone()
     }
 
     fn stream<'a>(
@@ -256,6 +258,7 @@ impl Model for ScriptedModel {
             tools: request.tools.to_vec(),
             parallel_tool_calls: request.parallel_tool_calls,
             prompt_cache_key: request.prompt_cache_key.map(str::to_string),
+            settings: request.settings,
         };
         let index = {
             let mut log = self.seen.lock().unwrap_or_else(PoisonError::into_inner);

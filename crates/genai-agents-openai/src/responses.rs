@@ -3,7 +3,11 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 
-use genai_agents::{MaybeSend, MaybeSync, Model, ModelError, ModelInfo, ModelRequest, ModelStream};
+use genai_agents::{
+    MaybeSend, MaybeSync, Model, ModelError, ModelInfo, ModelRequest, ModelStream, Origin,
+    ReasoningLevel,
+};
+use openai_ergonomic::semantic_conventions::operation_names;
 use openai_ergonomic::{Builder, Client, ResponsesBuilder};
 use serde_json::Value;
 
@@ -27,9 +31,17 @@ use crate::{convert, http};
 /// - responses are streamed, so the runner starts a tool call as soon as the model finished
 ///   writing it.
 ///
-/// The requests go through the client's HTTP stack: its retries, its provider (OpenAI, Azure
-/// OpenAI, a compatible API) with the credentials, the layers of the application, its rate
-/// limits ([`Client::rate_limits`]). The client's interceptors are not called.
+/// The request's [settings](genai_agents::ModelSettings) override the template's: the reasoning
+/// level becomes `reasoning.effort` ([`ReasoningLevel::Off`] is `none`), the output limit
+/// `max_output_tokens`.
+///
+/// The requests go the way of the client's own calls: through its interceptors (such as
+/// Langfuse's) and its HTTP stack, with its retries, its provider (OpenAI, Azure OpenAI, a
+/// compatible API) and credentials, the layers of the application, and its rate limits
+/// ([`Client::rate_limits`]).
+///
+/// Its items record the model as their [origin](genai_agents::ItemMeta::origin): API
+/// `openai-responses`, provider [`PROVIDER`](crate::PROVIDER), and the template's model.
 ///
 /// ```rust,no_run
 /// use genai_agents::{Conversation, Runner, ToolRegistry};
@@ -56,14 +68,44 @@ pub struct OpenAiResponses<T = ()> {
     store: bool,
     stream: bool,
     include_encrypted_reasoning: bool,
+    origin: Origin,
+}
+
+/// The API name of the Responses API in item origins.
+pub const RESPONSES_API: &str = "openai-responses";
+
+/// The `effort` of OpenAI's reasoning for a level.
+pub(crate) fn effort(level: ReasoningLevel) -> &'static str {
+    match level {
+        ReasoningLevel::Off => "none",
+        ReasoningLevel::Minimal => "minimal",
+        ReasoningLevel::Low => "low",
+        ReasoningLevel::High => "high",
+        ReasoningLevel::XHigh => "xhigh",
+        _ => "medium",
+    }
+}
+
+/// The `model` of a built request template, or nothing.
+pub(crate) fn template_model(built: Option<Value>) -> String {
+    built
+        .and_then(|body| {
+            body.get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
 }
 
 impl<T> OpenAiResponses<T> {
     /// The Responses API of `client`, with this request template.
     pub fn new(client: Client<T>, template: ResponsesBuilder) -> Self {
+        let built = template.clone().user("placeholder").build().ok();
+        let model = template_model(built.and_then(|built| serde_json::to_value(built).ok()));
         Self {
             client,
             template,
+            origin: Origin::new(RESPONSES_API, crate::PROVIDER, model),
             info: ModelInfo::default(),
             store: false,
             stream: true,
@@ -74,7 +116,7 @@ impl<T> OpenAiResponses<T> {
     /// The same model, with what it can take (default: images, rich tool outputs, custom tools,
     /// namespaces; no tool search of its own, no reasoning). With
     /// [`ModelInfo::tool_search`], deferred tools are sent with `defer_loading` and the hosted
-    /// `tool_search` tool.
+    /// `tool_search` tool. Without an [origin](ModelInfo::origin), the model's own is used.
     #[must_use]
     pub fn with_info(mut self, info: ModelInfo) -> Self {
         self.info = info;
@@ -156,6 +198,18 @@ impl<T> OpenAiResponses<T> {
         if let Some(key) = request.prompt_cache_key {
             map.insert("prompt_cache_key".into(), Value::String(key.to_string()));
         }
+        if let Some(level) = request.settings.reasoning {
+            let reasoning = map
+                .entry("reasoning")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !reasoning.is_object() {
+                *reasoning = Value::Object(serde_json::Map::new());
+            }
+            reasoning["effort"] = Value::String(effort(level).to_string());
+        }
+        if let Some(tokens) = request.settings.max_output_tokens {
+            map.insert("max_output_tokens".into(), Value::from(tokens));
+        }
         let reasoning = self.info.reasoning || map.get("reasoning").is_some_and(Value::is_object);
         if stateless && self.include_encrypted_reasoning && reasoning {
             let include = map
@@ -183,10 +237,14 @@ impl<T> OpenAiResponses<T> {
 impl<T> Model for OpenAiResponses<T>
 where
     Client<T>: MaybeSend + MaybeSync,
-    T: MaybeSend + MaybeSync,
+    T: Default + MaybeSend + MaybeSync + 'static,
 {
     fn info(&self) -> ModelInfo {
-        self.info
+        let mut info = self.info.clone();
+        if info.origin.is_none() {
+            info.origin = Some(self.origin.clone());
+        }
+        info
     }
 
     fn stream<'a>(
@@ -196,19 +254,19 @@ where
         let body = self.body(&request);
         async move {
             let body = body?;
-            let response = http::post(&self.client, "/responses", &body, self.stream).await?;
-            let rate_limits = http::rate_limits(response.headers());
-            let stream = if self.stream {
-                ModelStream::new(http::response_stream(
-                    response,
-                    self.client.config().stream_idle_timeout(),
-                ))
-            } else {
-                let response = http::json_body(response).await?;
-                let events = http::response_events(&response, &mut BTreeSet::new());
-                ModelStream::new(Box::pin(futures::stream::iter(events)))
-            };
-            Ok(stream.with_rate_limits(rate_limits))
+            let operation = operation_names::RESPONSES;
+            if self.stream {
+                let (events, rate_limits) =
+                    http::event_call(&self.client, operation, "/responses", &body).await?;
+                return Ok(
+                    ModelStream::new(http::response_stream(events)).with_rate_limits(rate_limits)
+                );
+            }
+            let (response, rate_limits) =
+                http::call(&self.client, operation, "/responses", &body).await?;
+            let events = http::response_events(&response, &mut BTreeSet::new());
+            Ok(ModelStream::new(Box::pin(futures::stream::iter(events)))
+                .with_rate_limits(rate_limits))
         }
     }
 

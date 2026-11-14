@@ -2,8 +2,9 @@
 //! reasoning and the provider's own items, independent of the model provider.
 //!
 //! Every item is `Serialize` and `Deserialize`, so a conversation can be stored and sent again,
-//! also to another provider: a provider sends the items it can, and leaves out the
-//! [`Reasoning`] and [`ProviderItem`]s of other providers.
+//! also to another provider or model. Items the model wrote record where they came from
+//! ([`ItemMeta::origin`]), so that the [projection](crate::Conversation::for_request) for another
+//! model leaves out the reasoning and provider state only their own model can read.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +42,30 @@ impl Item {
         Self::Message(Message::text(Role::Assistant, text))
     }
 
+    /// What is known about the item: where it came from, the turn that produced it, whether it
+    /// is injected context, whether it was cut off.
+    #[must_use]
+    pub fn meta(&self) -> &ItemMeta {
+        match self {
+            Self::Message(message) => &message.meta,
+            Self::ToolCall(call) => &call.meta,
+            Self::ToolOutput(output) => &output.meta,
+            Self::Reasoning(reasoning) => &reasoning.meta,
+            Self::Provider(item) => &item.meta,
+        }
+    }
+
+    /// The item's [metadata](ItemMeta), to change it.
+    pub fn meta_mut(&mut self) -> &mut ItemMeta {
+        match self {
+            Self::Message(message) => &mut message.meta,
+            Self::ToolCall(call) => &mut call.meta,
+            Self::ToolOutput(output) => &mut output.meta,
+            Self::Reasoning(reasoning) => &mut reasoning.meta,
+            Self::Provider(item) => &mut item.meta,
+        }
+    }
+
     /// The id the provider gave the item, if any.
     #[must_use]
     pub fn id(&self) -> Option<&str> {
@@ -48,7 +73,8 @@ impl Item {
             Self::Message(message) => message.id.as_deref(),
             Self::ToolCall(call) => call.id.as_deref(),
             Self::Reasoning(reasoning) => reasoning.id.as_deref(),
-            Self::ToolOutput(_) | Self::Provider(_) => None,
+            Self::ToolOutput(output) => output.id.as_deref(),
+            Self::Provider(_) => None,
         }
     }
 }
@@ -83,6 +109,115 @@ impl From<ProviderItem> for Item {
     }
 }
 
+/// Where an item came from: the API, the provider and the model that wrote it.
+///
+/// A [`Model`](crate::Model) names itself the same way ([`ModelInfo::origin`](crate::ModelInfo::origin)),
+/// so that the [projection](crate::Conversation::for_request) for a model can tell its own
+/// reasoning and provider state from another model's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Origin {
+    /// The API, such as `openai-responses` or `openai-chat`.
+    pub api: String,
+    /// The provider, such as `openai` or `azure`.
+    pub provider: String,
+    /// The model, such as `gpt-5-mini`.
+    pub model: String,
+}
+
+impl Origin {
+    /// The `model` of `provider`, through `api`.
+    #[must_use]
+    pub fn new(
+        api: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            api: api.into(),
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+
+    /// Whether an item of this origin can be read by `other`: the same provider, API and model.
+    #[must_use]
+    pub fn same_model(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+/// What is known about an item besides its content. Every field is optional: an item made by
+/// the application has none of them.
+///
+/// It is serialized as the item's `meta` field, left out when empty, so stored conversations
+/// without it still load.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ItemMeta {
+    /// The model that wrote the item; `None` for an item of the application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
+    /// The model response that produced the item, counted over the whole conversation from 1
+    /// ([`Conversation::next_turn`](crate::Conversation::next_turn)); `None` for an item of the
+    /// application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u32>,
+    /// Whether the item is context the application injected (instructions, a skill, a note),
+    /// not input of the user or output of the model; later compaction can take it out and put it
+    /// back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub injected: bool,
+    /// Whether the item was cut off: the partial text of a response that was cancelled or
+    /// failed, or a call the response stopped in the middle of. It is kept for the application;
+    /// the [projection](crate::Conversation::for_request) does not send it, and the runner does
+    /// not run such a call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
+}
+
+impl ItemMeta {
+    /// No metadata.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether nothing is known.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// The same metadata, with the model that wrote the item.
+    #[must_use]
+    pub fn with_origin(mut self, origin: Origin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// The same metadata, with the turn that produced the item.
+    #[must_use]
+    pub fn with_turn(mut self, turn: u32) -> Self {
+        self.turn = Some(turn);
+        self
+    }
+
+    /// The same metadata, marked as injected context (or not).
+    #[must_use]
+    pub fn with_injected(mut self, injected: bool) -> Self {
+        self.injected = injected;
+        self
+    }
+
+    /// The same metadata, marked as cut off (or not).
+    #[must_use]
+    pub fn with_interrupted(mut self, interrupted: bool) -> Self {
+        self.interrupted = interrupted;
+        self
+    }
+}
+
 /// Who wrote a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +245,9 @@ pub struct Message {
     pub role: Role,
     /// Text, images and files, in order.
     pub content: Vec<Content>,
+    /// Where it came from, and whether it is injected context.
+    #[serde(default, skip_serializing_if = "ItemMeta::is_empty")]
+    pub meta: ItemMeta,
 }
 
 impl Message {
@@ -126,7 +264,23 @@ impl Message {
             id: None,
             role,
             content,
+            meta: ItemMeta::default(),
         }
+    }
+
+    /// The same message, with this metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: ItemMeta) -> Self {
+        self.meta = meta;
+        self
+    }
+
+    /// The same message, marked as context the application injected (instructions, a skill,
+    /// a note) rather than input of the user.
+    #[must_use]
+    pub fn injected(mut self) -> Self {
+        self.meta.injected = true;
+        self
     }
 
     /// The same message, with the id the provider gave it.
@@ -334,6 +488,14 @@ pub struct ToolCall {
     pub kind: ToolKind,
     /// The JSON arguments of a function call, or the text input of a custom call.
     pub input: String,
+    /// State the provider attached to the call and wants back with it (such as a signature of
+    /// the model's reasoning), opaque to everyone else. The projection for another model leaves
+    /// it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_state: Option<Value>,
+    /// Where it came from, and whether it was cut off.
+    #[serde(default, skip_serializing_if = "ItemMeta::is_empty")]
+    pub meta: ItemMeta,
 }
 
 impl ToolCall {
@@ -351,6 +513,8 @@ impl ToolCall {
             name: name.into(),
             kind: ToolKind::Function,
             input: arguments.into(),
+            provider_state: None,
+            meta: ItemMeta::default(),
         }
     }
 
@@ -387,6 +551,20 @@ impl ToolCall {
     #[must_use]
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    /// The same call, with the provider's opaque state for it.
+    #[must_use]
+    pub fn with_provider_state(mut self, state: Value) -> Self {
+        self.provider_state = Some(state);
+        self
+    }
+
+    /// The same call, with this metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: ItemMeta) -> Self {
+        self.meta = meta;
         self
     }
 }
@@ -482,6 +660,10 @@ pub const ABORTED_OUTPUT: &str = "aborted";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ToolOutput {
+    /// The id of the output item, if it has one: the provider's, or for an answer the
+    /// projection made up, one derived from the call id (so that it is the same every time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// The identifier of the call this answers.
     pub call_id: String,
     /// The kind of call it answers.
@@ -496,6 +678,14 @@ pub struct ToolOutput {
     /// sent to the model.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub untrusted: bool,
+    /// What the tool reported for the application only, such as the full data behind a short
+    /// answer or a diff to show. Never sent to the model. Set by
+    /// [`FunctionTool::details`](crate::tools::FunctionTool::details) or by the application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+    /// Where it came from.
+    #[serde(default, skip_serializing_if = "ItemMeta::is_empty")]
+    pub meta: ItemMeta,
 }
 
 impl ToolOutput {
@@ -503,12 +693,29 @@ impl ToolOutput {
     #[must_use]
     pub fn new(call: &ToolCall, body: impl Into<ToolOutputBody>, success: bool) -> Self {
         Self {
+            id: None,
             call_id: call.call_id.clone(),
             kind: call.kind.clone(),
             body: body.into(),
             success,
             untrusted: false,
+            details: None,
+            meta: ItemMeta::default(),
         }
+    }
+
+    /// The same answer, with details for the application, which the model never sees.
+    #[must_use]
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
+    /// The same answer, with the id of its item.
+    #[must_use]
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     /// The same answer, marked as holding content from outside the application (or not).
@@ -547,6 +754,9 @@ pub struct Reasoning {
     /// between requests without the provider storing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_content: Option<String>,
+    /// Where it came from: only that model can read its encrypted content.
+    #[serde(default, skip_serializing_if = "ItemMeta::is_empty")]
+    pub meta: ItemMeta,
 }
 
 impl Reasoning {
@@ -558,7 +768,15 @@ impl Reasoning {
             provider: provider.into(),
             summary: Vec::new(),
             encrypted_content: None,
+            meta: ItemMeta::default(),
         }
+    }
+
+    /// The same reasoning, with this metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: ItemMeta) -> Self {
+        self.meta = meta;
+        self
     }
 
     /// The same reasoning, with an id.
@@ -591,6 +809,9 @@ pub struct ProviderItem {
     pub provider: String,
     /// The item, as the provider sent it.
     pub data: Value,
+    /// Where it came from.
+    #[serde(default, skip_serializing_if = "ItemMeta::is_empty")]
+    pub meta: ItemMeta,
 }
 
 impl ProviderItem {
@@ -600,7 +821,15 @@ impl ProviderItem {
         Self {
             provider: provider.into(),
             data,
+            meta: ItemMeta::default(),
         }
+    }
+
+    /// The same item, with this metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: ItemMeta) -> Self {
+        self.meta = meta;
+        self
     }
 }
 
