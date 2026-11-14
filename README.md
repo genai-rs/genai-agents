@@ -6,7 +6,8 @@
 Agents for Rust: a tool loop, sessions, guardrails, handoffs and tracing, on top of the
 [genai-rs](https://github.com/genai-rs) clients.
 
-Nothing here is usable yet: the published crates only reserve their names.
+Nothing here is usable yet: the published crates only reserve their names. The [design](docs/design.md) describes
+what they will hold and in which order.
 
 | Crate | What it holds |
 | --- | --- |

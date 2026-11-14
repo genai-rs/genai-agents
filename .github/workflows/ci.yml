@@ -10,6 +10,4 @@ jobs:
     uses: genai-rs/.github/.github/workflows/rust-ci.yml@main
     with:
       msrv: "1.88"
-      # Nothing published to compare against before the first release.
-      run-semver-checks: false
     secrets: inherit

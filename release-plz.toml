@@ -22,7 +22,7 @@ pr_body = """
 ## {{ release.package }} {{ release.previous_version }} → {{ release.next_version }}
 
 ### Compare Changes
-[**View all changes since v{{ release.previous_version }}**](https://github.com/genai-rs/genai-agents/compare/{{ release.package }}-v{{ release.previous_version }}...HEAD)
+[**View all changes since {{ release.package }} {{ release.previous_version }}**](https://github.com/genai-rs/genai-agents/compare/{{ release.package }}-v{{ release.previous_version }}...HEAD)
 
 {%- if release.changelog %}
 
