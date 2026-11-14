@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.1.0...genai-agents-v0.2.0) - 2026-11-14
+
+### Added
+
+- [**breaking**] item origins, request projections, Compat and the client's interceptors
+
+### Other
+
+- release
+
 ## [0.1.0](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.0.1...genai-agents-v0.1.0) - 2026-11-14
 
 ### Added
