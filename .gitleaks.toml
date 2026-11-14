@@ -1,0 +1,17 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlisted patterns"
+paths = [
+    '''Cargo\.lock''',
+    '''target/''',
+    '''\.git/''',
+]
+regexes = [
+    '''test-key''',
+    '''example-key''',
+    '''dummy-key''',
+    '''fake-key''',
+    '''OPENAI_API_KEY''',
+]

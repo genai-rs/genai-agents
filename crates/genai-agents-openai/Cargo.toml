@@ -1,0 +1,20 @@
+[package]
+name = "genai-agents-openai"
+version = "0.0.1"
+description = "The OpenAI provider for genai-agents, on openai-ergonomic"
+documentation = "https://docs.rs/genai-agents-openai"
+readme = "README.md"
+keywords = ["agents", "llm", "openai", "tools", "ai"]
+categories = ["api-bindings", "asynchronous"]
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
