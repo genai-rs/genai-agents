@@ -1,19 +1,26 @@
 # genai-agents
 
-[![CI](https://github.com/genai-rs/genai-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/genai-rs/genai-agents/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![Crates.io](https://img.shields.io/crates/v/genai-agents)](https://crates.io/crates/genai-agents)
+[![docs.rs](https://img.shields.io/docsrs/genai-agents)](https://docs.rs/genai-agents)
 
-Agents for Rust: a tool loop, sessions, guardrails, handoffs and tracing, on top of the
-[genai-rs](https://github.com/genai-rs) clients.
+Agents for Rust, independent of the model provider: typed tools, a provider-independent conversation, and a
+`Runner` that calls a `Model` in a loop, runs the tools it asks for and sends their outputs back until it answers.
 
-Nothing here is usable yet: the published crates only reserve their names.
+```bash
+cargo add genai-agents genai-agents-openai
+```
 
-| Crate | What it holds |
-| --- | --- |
-| `genai-agents` | the agent and its loop, tools, sessions, guardrails, hooks, handoffs and tracing, independent of the model provider |
-| `genai-agents-openai` | the OpenAI provider, on [openai-ergonomic](https://github.com/genai-rs/openai-ergonomic) |
+A provider crate gives the model: [genai-agents-openai](https://docs.rs/genai-agents-openai) for OpenAI and the
+APIs that speak it. The [API reference](https://docs.rs/genai-agents) has a complete example; the guides cover
+[the runner](https://github.com/genai-rs/genai-agents/blob/main/docs/runner.md) and
+[tools](https://github.com/genai-rs/genai-agents/blob/main/docs/tools.md).
+
+Features:
+
+- `schemars`: a tool's parameters schema derived from its input type (`tools::schema::for_type`);
+- `testing`: `testing::ScriptedModel`, a model that answers as a script says, for tests.
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](https://github.com/genai-rs/genai-agents/blob/main/LICENSE-APACHE) or [MIT license](https://github.com/genai-rs/genai-agents/blob/main/LICENSE-MIT) at your
-option.
+Licensed under either of [Apache License, Version 2.0](https://github.com/genai-rs/genai-agents/blob/main/LICENSE-APACHE)
+or [MIT license](https://github.com/genai-rs/genai-agents/blob/main/LICENSE-MIT) at your option.
