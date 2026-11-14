@@ -118,6 +118,13 @@ pub trait FunctionTool: MaybeSend + MaybeSync {
     fn untrusted_output(&self) -> bool {
         false
     }
+    /// What to report about `output` to the application only: it goes into the answer's
+    /// [`details`](ToolOutput::details), which the model never sees (the full data behind a
+    /// short answer, a diff to show, timings). Default `None`.
+    fn details(&self, output: &Self::Output) -> Option<Value> {
+        let _ = output;
+        None
+    }
 }
 
 /// A function tool whose output is more than JSON text.
@@ -599,21 +606,30 @@ impl ToolKey {
 
 /// What a handler produced: JSON from a [`FunctionTool`], a body from the others.
 enum ErasedOutput {
-    Json(Value),
+    /// A function tool's output, and its details for the application.
+    Json(Value, Option<Value>),
     Body(ToolOutputBody),
 }
 
 impl ErasedOutput {
+    /// The details of a function tool's output.
+    fn details(&self) -> Option<Value> {
+        match self {
+            Self::Json(_, details) => details.clone(),
+            Self::Body(_) => None,
+        }
+    }
+
     fn into_body(self) -> ToolOutputBody {
         match self {
-            Self::Json(value) => ToolOutputBody::Text(value.to_string()),
+            Self::Json(value, _) => ToolOutputBody::Text(value.to_string()),
             Self::Body(body) => body,
         }
     }
 
     fn into_value(self) -> Value {
         match self {
-            Self::Json(value) => value,
+            Self::Json(value, _) => value,
             Self::Body(ToolOutputBody::Text(text)) => Value::String(text),
             Self::Body(body) => serde_json::to_value(&body).unwrap_or(Value::Null),
         }
@@ -667,8 +683,9 @@ impl<T: FunctionTool> ErasedTool for FunctionAdapter<T> {
             let output = FunctionTool::execute(&self.0, input)
                 .await
                 .map_err(execution_error(name))?;
+            let details = FunctionTool::details(&self.0, &output);
             serde_json::to_value(output)
-                .map(ErasedOutput::Json)
+                .map(|value| ErasedOutput::Json(value, details))
                 .map_err(|source| ToolError::Output {
                     name: name.into(),
                     source,
@@ -1271,12 +1288,14 @@ impl ToolRegistry {
             });
         }
         match self.run(&call).await {
-            Ok(output) => {
+            Ok((output, details)) => {
                 let untrusted = self
                     .tools
                     .get(&ToolKey::of(&call))
                     .is_some_and(|tool| tool.untrusted);
-                Ok(ToolOutput::new(&call, output, true).with_untrusted(untrusted))
+                let mut answer = ToolOutput::new(&call, output, true).with_untrusted(untrusted);
+                answer.details = details;
+                Ok(answer)
             }
             Err(error) => match classify(error) {
                 ToolFailure::Fatal(error) => Err(ToolError::Call {
@@ -1288,7 +1307,10 @@ impl ToolRegistry {
         }
     }
 
-    async fn run(&self, call: &ToolCall) -> std::result::Result<ToolOutputBody, ToolError> {
+    async fn run(
+        &self,
+        call: &ToolCall,
+    ) -> std::result::Result<(ToolOutputBody, Option<Value>), ToolError> {
         if let ToolKind::Other(kind) = &call.kind {
             return Err(ToolError::InvalidCall {
                 reason: format!("unsupported call type {kind:?}"),
@@ -1311,7 +1333,10 @@ impl ToolRegistry {
         tool.handler
             .call(&call.name, &call.input)
             .await
-            .map(ErasedOutput::into_body)
+            .map(|output| {
+                let details = output.details();
+                (output.into_body(), details)
+            })
     }
 }
 

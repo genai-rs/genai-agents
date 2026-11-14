@@ -3,6 +3,7 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use crate::model::ModelSettings;
 use crate::tools::TruncationConfig;
 
 /// The `prompt_cache_key` the runner sends with every request.
@@ -160,6 +161,9 @@ pub struct RunConfig {
     /// The runner's own tool search over deferred tools; `None` to offer none (deferred tools are
     /// then only advertised once [loaded](super::Runner::load_tool)). Default on.
     pub tool_search: Option<ToolSearchConfig>,
+    /// The settings every request carries: the reasoning level, the output limit. Default: the
+    /// provider's.
+    pub model_settings: ModelSettings,
 }
 
 impl Default for RunConfig {
@@ -171,6 +175,7 @@ impl Default for RunConfig {
             truncation: TruncationConfig::default(),
             retry: RetryConfig::default(),
             tool_search: Some(ToolSearchConfig::default()),
+            model_settings: ModelSettings::default(),
         }
     }
 }
@@ -221,6 +226,13 @@ impl RunConfig {
     #[must_use]
     pub fn with_tool_search(mut self, search: Option<ToolSearchConfig>) -> Self {
         self.tool_search = search;
+        self
+    }
+
+    /// The settings every request carries.
+    #[must_use]
+    pub fn with_model_settings(mut self, settings: ModelSettings) -> Self {
+        self.model_settings = settings;
         self
     }
 }

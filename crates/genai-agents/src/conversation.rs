@@ -1,29 +1,35 @@
-//! The history of a run: [`Item`]s, repaired before every request.
+//! The history of a run: [`Item`]s, kept as they came, and projected for each request.
 
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::item::ItemMeta;
 use crate::item::{Content, Item, Message, Role, ToolCall, ToolOutput};
-use crate::model::ModelInfo;
+use crate::model::{fnv1a, ModelInfo};
 
 /// The text that replaces an image when the model takes none ([`ModelInfo::images`]).
 pub const IMAGE_OMITTED: &str = "[image omitted: the model does not accept images]";
 
 /// A conversation: messages, the model's output items, tool calls and their outputs, in order.
 ///
-/// A [`Runner`](crate::Runner) appends the model's items and the answers to its tool calls, and
-/// [repairs](Self::normalize) the history before every request. It is `Serialize` and
-/// `Deserialize`: store it and run on it again later.
+/// A [`Runner`](crate::Runner) appends the model's items and the answers to its tool calls, as
+/// they came, and sends each request a [projection](Self::for_request) of them for its model. It
+/// is `Serialize` and `Deserialize`: store it and run on it again later.
 ///
 /// ```
-/// use genai_agents::{Conversation, ModelInfo, ToolCall};
+/// use genai_agents::{Conversation, Item, ModelInfo, ToolCall};
 ///
 /// let mut conversation = Conversation::new();
 /// conversation.push_user("What is the weather in Ghent?");
 /// conversation.push_call(&ToolCall::function("call_1", "get_weather", r#"{"city":"Ghent"}"#));
-/// // The call was never answered (say, the application stopped): repair the history.
-/// let report = conversation.normalize(ModelInfo::default());
+/// // The call was never answered (say, the application stopped). The request gets an answer
+/// // for it; the conversation stays as it is.
+/// let request = conversation.for_request(&ModelInfo::default());
+/// assert!(matches!(&request.items()[2], Item::ToolOutput(output) if output.call_id == "call_1"));
+/// assert_eq!(conversation.unanswered_calls().len(), 1);
+/// // Or repair the conversation itself.
+/// let report = conversation.normalize(&ModelInfo::default());
 /// assert_eq!(report.aborted, ["call_1"]);
 /// assert!(conversation.unanswered_calls().is_empty());
 /// ```
@@ -43,6 +49,23 @@ pub struct NormalizeReport {
     pub orphans: Vec<String>,
     /// The images replaced with a text because the model takes none.
     pub images: usize,
+}
+
+/// What [`Conversation::for_request`] left out or changed, besides what
+/// [`normalize`](Conversation::normalize) does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProjectionReport {
+    /// What the repair changed: answers made up, orphan outputs dropped, images replaced.
+    pub normalized: NormalizeReport,
+    /// The items left out because they were cut off ([`ItemMeta::interrupted`]).
+    pub interrupted: usize,
+    /// The reasoning and provider items left out because another model wrote them.
+    pub foreign: usize,
+    /// The calls whose provider state was left out because another model wrote them.
+    pub provider_states: usize,
+    /// The call ids rewritten for the model ([`ModelInfo::call_ids`]).
+    pub call_ids: usize,
 }
 
 impl NormalizeReport {
@@ -185,6 +208,17 @@ impl Conversation {
             .collect()
     }
 
+    /// The turn the next model response is: one more than the highest
+    /// [`ItemMeta::turn`] of the conversation, or 1.
+    #[must_use]
+    pub fn next_turn(&self) -> u32 {
+        self.items
+            .iter()
+            .filter_map(|item| item.meta().turn)
+            .max()
+            .map_or(1, |turn| turn.saturating_add(1))
+    }
+
     /// The text of the last assistant message, if any.
     #[must_use]
     pub fn last_assistant_text(&self) -> Option<String> {
@@ -224,80 +258,176 @@ impl Conversation {
         removed
     }
 
-    /// Repair the history so that a model accepts it; idempotent:
+    /// Repair the conversation itself so that a model accepts it; idempotent:
     ///
     /// - a call without an output gets one, `"aborted"`, after the call and the calls and outputs
     ///   that directly follow it (so that a chat assistant message keeps its tool messages
     ///   together);
     /// - an output whose call is not earlier in the conversation is dropped;
-    /// - when the model takes no images (`caps.images` is false), the images of messages and
-    ///   tool outputs are replaced with a short text ([`IMAGE_OMITTED`]).
+    /// - when the model takes no images ([`ModelInfo::images`] is false), the images of messages
+    ///   and tool outputs are replaced with a short text ([`IMAGE_OMITTED`]).
     ///
-    /// The synthetic outputs carry no id, so the repaired history is the same every time: the
-    /// prompt cache still applies.
-    pub fn normalize(&mut self, caps: ModelInfo) -> NormalizeReport {
-        let mut report = NormalizeReport::default();
-
-        // Orphan outputs.
-        let mut calls = BTreeSet::new();
-        self.items.retain(|item| match link(item) {
-            Link::Call(id) => {
-                calls.insert(id.to_string());
-                true
-            }
-            Link::Output(id) if calls.contains(id) => true,
-            Link::Output(id) => {
-                report.orphans.push(id.to_string());
-                false
-            }
-            Link::None => true,
-        });
-
-        // Missing outputs.
-        let answered: BTreeSet<String> = self
-            .items
-            .iter()
-            .filter_map(|item| match link(item) {
-                Link::Output(id) => Some(id.to_string()),
-                _ => None,
-            })
-            .collect();
-        let mut index = 0;
-        while index < self.items.len() {
-            if let Item::ToolCall(call) = &self.items[index] {
-                if !answered.contains(&call.call_id) {
-                    let answer = ToolOutput::aborted(call);
-                    report.aborted.push(call.call_id.clone());
-                    let mut at = index + 1;
-                    while at < self.items.len() && link(&self.items[at]) != Link::None {
-                        at += 1;
-                    }
-                    self.items.insert(at, Item::ToolOutput(answer));
-                }
-            }
-            index += 1;
-        }
-
-        if !caps.images {
-            for item in &mut self.items {
-                let parts = match item {
-                    Item::Message(message) => Some(&mut message.content),
-                    Item::ToolOutput(output) => match &mut output.body {
-                        crate::item::ToolOutputBody::Items(items) => Some(items),
-                        crate::item::ToolOutputBody::Text(_) => None,
-                    },
-                    _ => None,
-                };
-                for part in parts.into_iter().flatten() {
-                    if part.is_image() {
-                        *part = Content::text(IMAGE_OMITTED);
-                        report.images += 1;
-                    }
-                }
-            }
-        }
-        report
+    /// The runner does not change the stored conversation this way: it sends a
+    /// [projection](Self::for_request), which repairs a copy.
+    pub fn normalize(&mut self, info: &ModelInfo) -> NormalizeReport {
+        repair(&mut self.items, info)
     }
+
+    /// The conversation as a request to the model `info` describes: a copy, repaired and fitted
+    /// to the model; the conversation itself does not change. The same conversation gives the
+    /// same projection, byte for byte, so the provider's prompt cache holds.
+    ///
+    /// - Items cut off ([`ItemMeta::interrupted`]: the partial text of a cancelled or failed
+    ///   response) are left out; a cut-off call stays, with its answer.
+    /// - Reasoning and provider items another model wrote are left out, and so is the provider
+    ///   state of its calls ([`ToolCall::provider_state`]): only the model that wrote them can
+    ///   read them. An item without an [origin](ItemMeta::origin) is kept when its provider is
+    ///   the model's. When [`ModelInfo::origin`] is `None`, everything is kept.
+    /// - Then it is [repaired](Self::normalize): an answer that the model's call never got is
+    ///   made up, `"aborted"`, with an id derived from the call id; orphan outputs are dropped;
+    ///   images are replaced for a model without vision.
+    /// - Call ids the model does not take ([`ModelInfo::call_ids`]) are rewritten, in calls and
+    ///   outputs alike.
+    #[must_use]
+    pub fn for_request(&self, info: &ModelInfo) -> Self {
+        self.project(info).0
+    }
+
+    /// [`for_request`](Self::for_request), with what it left out or changed.
+    #[must_use]
+    pub fn project(&self, info: &ModelInfo) -> (Self, ProjectionReport) {
+        let mut report = ProjectionReport::default();
+        let target = info.origin.as_ref();
+        let mut items = Vec::with_capacity(self.items.len());
+        for item in &self.items {
+            let meta = item.meta();
+            if meta.interrupted && !matches!(item, Item::ToolCall(_)) {
+                report.interrupted += 1;
+                continue;
+            }
+            let readable = |provider: &str| match (target, &meta.origin) {
+                (None, _) => true,
+                (Some(target), Some(origin)) => origin.same_model(target),
+                (Some(target), None) => provider == target.provider,
+            };
+            match item {
+                Item::Reasoning(reasoning) if !readable(&reasoning.provider) => {
+                    report.foreign += 1;
+                }
+                Item::Provider(provider)
+                    if !same_provider(target, &provider.provider, &provider.meta) =>
+                {
+                    report.foreign += 1;
+                }
+                Item::ToolCall(call)
+                    if call.provider_state.is_some()
+                        && matches!((target, &call.meta.origin), (Some(target), Some(origin)) if !origin.same_model(target)) =>
+                {
+                    let mut call = call.clone();
+                    call.provider_state = None;
+                    report.provider_states += 1;
+                    items.push(Item::ToolCall(call));
+                }
+                other => items.push(other.clone()),
+            }
+        }
+        report.normalized = repair(&mut items, info);
+        if info.call_ids != crate::model::CallIds::Any {
+            for item in &mut items {
+                let id = match item {
+                    Item::ToolCall(call) => &mut call.call_id,
+                    Item::ToolOutput(output) => &mut output.call_id,
+                    _ => continue,
+                };
+                if !info.call_ids.accepts(id) {
+                    *id = info.call_ids.rewrite(id);
+                    report.call_ids += 1;
+                }
+            }
+        }
+        (Self { items }, report)
+    }
+}
+
+/// Whether a provider item of `provider` can go to the model `target`: the same provider, and
+/// the same API when its origin is known.
+fn same_provider(target: Option<&crate::item::Origin>, provider: &str, meta: &ItemMeta) -> bool {
+    let Some(target) = target else {
+        return true;
+    };
+    match &meta.origin {
+        Some(origin) => origin.provider == target.provider && origin.api == target.api,
+        None => provider == target.provider,
+    }
+}
+
+/// The id of an answer the repair made up for the call `call_id`: the same every time.
+fn synthetic_output_id(call_id: &str) -> String {
+    format!("aborted_{:016x}", fnv1a(call_id.as_bytes()))
+}
+
+/// Repair `items` so that a model accepts them: see [`Conversation::normalize`].
+fn repair(items: &mut Vec<Item>, info: &ModelInfo) -> NormalizeReport {
+    let mut report = NormalizeReport::default();
+
+    // Orphan outputs.
+    let mut calls = BTreeSet::new();
+    items.retain(|item| match link(item) {
+        Link::Call(id) => {
+            calls.insert(id.to_string());
+            true
+        }
+        Link::Output(id) if calls.contains(id) => true,
+        Link::Output(id) => {
+            report.orphans.push(id.to_string());
+            false
+        }
+        Link::None => true,
+    });
+
+    // Missing outputs.
+    let answered: BTreeSet<String> = items
+        .iter()
+        .filter_map(|item| match link(item) {
+            Link::Output(id) => Some(id.to_string()),
+            _ => None,
+        })
+        .collect();
+    let mut index = 0;
+    while index < items.len() {
+        if let Item::ToolCall(call) = &items[index] {
+            if !answered.contains(&call.call_id) {
+                let answer = ToolOutput::aborted(call).with_id(synthetic_output_id(&call.call_id));
+                report.aborted.push(call.call_id.clone());
+                let mut at = index + 1;
+                while at < items.len() && link(&items[at]) != Link::None {
+                    at += 1;
+                }
+                items.insert(at, Item::ToolOutput(answer));
+            }
+        }
+        index += 1;
+    }
+
+    if !info.images {
+        for item in items.iter_mut() {
+            let parts = match item {
+                Item::Message(message) => Some(&mut message.content),
+                Item::ToolOutput(output) => match &mut output.body {
+                    crate::item::ToolOutputBody::Items(items) => Some(items),
+                    crate::item::ToolOutputBody::Text(_) => None,
+                },
+                _ => None,
+            };
+            for part in parts.into_iter().flatten() {
+                if part.is_image() {
+                    *part = Content::text(IMAGE_OMITTED);
+                    report.images += 1;
+                }
+            }
+        }
+    }
+    report
 }
 
 impl From<Vec<Item>> for Conversation {
@@ -340,7 +470,7 @@ mod tests {
         conversation.push_call(&b);
         conversation.push_output(&ToolOutput::new(&b, "2", true));
         conversation.push_user("next");
-        let report = conversation.normalize(ModelInfo::default());
+        let report = conversation.normalize(&ModelInfo::default());
         assert_eq!(report.aborted, ["a"]);
         assert_eq!(
             kinds(&conversation),
@@ -352,14 +482,14 @@ mod tests {
         assert_eq!(aborted.body, ToolOutputBody::text(ABORTED_OUTPUT));
         assert!(!aborted.success);
         // Idempotent.
-        assert!(conversation.normalize(ModelInfo::default()).is_clean());
+        assert!(conversation.normalize(&ModelInfo::default()).is_clean());
     }
 
     #[test]
     fn custom_calls_get_custom_outputs() {
         let mut conversation = Conversation::new();
         conversation.push_call(&ToolCall::custom("c", "patch", "*** Begin").in_namespace("fs"));
-        conversation.normalize(ModelInfo::default());
+        conversation.normalize(&ModelInfo::default());
         let Item::ToolOutput(output) = &conversation.items()[1] else {
             panic!("an output expected");
         };
@@ -377,7 +507,7 @@ mod tests {
         conversation.push_output(&ToolOutput::new(&a, "1", true));
         let ghost = ToolCall::function("ghost", "f", "{}");
         conversation.push_output(&ToolOutput::new(&ghost, "?", true));
-        let report = conversation.normalize(ModelInfo::default());
+        let report = conversation.normalize(&ModelInfo::default());
         assert_eq!(report.orphans, ["a", "ghost"]);
         assert_eq!(report.aborted, Vec::<String>::new());
         assert_eq!(kinds(&conversation), ["message", "call:a", "output:a"]);
@@ -403,8 +533,8 @@ mod tests {
             ],
             true,
         ));
-        assert!(conversation.normalize(ModelInfo::default()).is_clean());
-        let report = conversation.normalize(ModelInfo::new().with_images(false));
+        assert!(conversation.normalize(&ModelInfo::default()).is_clean());
+        let report = conversation.normalize(&ModelInfo::new().with_images(false));
         assert_eq!(report.images, 2);
         let Item::ToolOutput(output) = &conversation.items()[2] else {
             panic!("an output expected");
@@ -414,7 +544,7 @@ mod tests {
             ToolOutputBody::Items(vec![Content::text("here"), Content::text(IMAGE_OMITTED)])
         );
         assert!(conversation
-            .normalize(ModelInfo::new().with_images(false))
+            .normalize(&ModelInfo::new().with_images(false))
             .is_clean());
     }
 

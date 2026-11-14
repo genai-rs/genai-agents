@@ -56,13 +56,15 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod chat;
+mod compat;
 mod convert;
 mod http;
 mod responses;
 
-pub use chat::OpenAiChat;
+pub use chat::{OpenAiChat, CHAT_API};
+pub use compat::{Compat, MaxTokensField};
 pub use convert::PROVIDER;
-pub use responses::OpenAiResponses;
+pub use responses::{OpenAiResponses, RESPONSES_API};
 
 /// The examples of the runner guide (`docs/runner.md`), compiled and run as doc tests.
 #[cfg(doctest)]

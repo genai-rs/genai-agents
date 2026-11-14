@@ -3,14 +3,17 @@
 //!
 //! It:
 //!
-//! - repairs the history before every request ([`Conversation::normalize`]): every call
-//!   answered, orphaned outputs dropped;
+//! - keeps the conversation as it came and sends each request a projection of it for the model
+//!   ([`Conversation::for_request`]): every call answered, orphan outputs dropped, the
+//!   reasoning of other models left out;
 //! - answers every call ([`ToolRegistry::answer_call`]), runs the calls of tools that
 //!   [allow it](crate::tools::FunctionTool::supports_parallel) at the same time and the others
 //!   alone, and records the answers in call order, cut to their
 //!   [budget](crate::tools::OutputBudget);
 //! - starts a call as soon as the model finished writing it ([`ModelEvent::ItemDone`]), while
-//!   the response goes on;
+//!   the response goes on, but never one the response stopped in the middle of
+//!   ([`StopReason::Length`], [`ItemMeta::interrupted`](crate::ItemMeta::interrupted));
+//! - keeps the partial text of a cancelled or failed response, marked as cut off;
 //! - stops after [`RunConfig::max_iterations`] requests, or when a [`CancellationSignal`] fires,
 //!   with a history that can be sent again;
 //! - retries a failed request as a whole, after the delay the server asked for or with backoff
@@ -39,7 +42,7 @@ pub use config::{PromptCacheKey, RetryConfig, RunConfig, ToolSearchConfig};
 
 use crate::conversation::Conversation;
 use crate::error::{Error, ModelError, Result, RetryClass};
-use crate::item::{Item, Role, ToolCall, ToolKind, ToolOutput};
+use crate::item::{Item, ItemMeta, Message, Role, ToolCall, ToolKind, ToolOutput};
 use crate::model::{
     Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelStream, RateLimits, StopReason,
     ToolDefinition, Usage,
@@ -47,6 +50,11 @@ use crate::model::{
 use crate::platform::{random_jitter, random_u64, sleep, MaybeSend};
 use crate::tools::{Advertise, Exposure, ToolError, ToolKey, ToolRegistry};
 use dispatch::Dispatcher;
+
+/// The answer to a call the model did not finish writing because its response stopped at the
+/// output limit: it is not run.
+pub const CUT_OFF_OUTPUT: &str =
+    "the response stopped at the output limit before this call was complete; it was not run";
 
 /// The name of the tool search tool the runner offers and answers itself.
 pub const TOOL_SEARCH: &str = "tool_search";
@@ -194,6 +202,8 @@ impl RunOutcome {
 }
 
 /// What a streamed attempt waits for.
+// Short-lived, one at a time: boxing the event would only add an allocation per event.
+#[allow(clippy::large_enum_variant)]
 enum Step {
     Event(Option<Result<ModelEvent, ModelError>>),
     Answered(std::result::Result<usize, ToolError>),
@@ -325,9 +335,9 @@ impl<M: Model> Runner<M> {
     /// were sent, a response stops early, or `cancel` fires; `on_event` sees what happens
     /// ([`RunEvent`]).
     ///
-    /// The model's output items and the answers to its calls are appended to `conversation`,
-    /// which stays consistent whatever happens: after an error too, every call it holds has an
-    /// answer or gets one ("aborted") at the next [`normalize`](Conversation::normalize).
+    /// The model's output items and the answers to its calls are appended to `conversation`, as
+    /// they came; each request is a [projection](Conversation::for_request) of it, which answers
+    /// a call that has no answer yet (after an error, say) with `"aborted"`.
     ///
     /// Fails with the error of a request that cannot be retried (or still fails after
     /// [`RetryConfig::max_retries`] retries), or with [`Error::Tool`] when a tool fails fatally
@@ -347,7 +357,6 @@ impl<M: Model> Runner<M> {
         let mut iteration = 0_u32;
         loop {
             if cancel.is_cancelled() {
-                conversation.normalize(self.model.info());
                 return Ok(RunOutcome::new(RunStop::Cancelled, turns));
             }
             if self
@@ -375,7 +384,7 @@ impl<M: Model> Runner<M> {
                 Err(error) => {
                     let answers = dispatcher.finished_answers();
                     self.state
-                        .record_outputs(conversation, answers, self.model.info());
+                        .record_outputs(conversation, answers, &self.model.info());
                     return Err(error);
                 }
             };
@@ -383,8 +392,7 @@ impl<M: Model> Runner<M> {
                 AttemptEnd::Cancelled => {
                     let answers = dispatcher.abort();
                     self.state
-                        .record_outputs(conversation, answers, self.model.info());
-                    conversation.normalize(self.model.info());
+                        .record_outputs(conversation, answers, &self.model.info());
                     turns.push(turn);
                     return Ok(RunOutcome::new(RunStop::Cancelled, turns));
                 }
@@ -423,7 +431,6 @@ impl<M: Model> Runner<M> {
     {
         let mut attempt = 0_u32;
         loop {
-            conversation.normalize(self.model.info());
             on_event(RunEvent::Request {
                 iteration: turn.iteration,
                 attempt,
@@ -521,7 +528,7 @@ impl<M: Model> Runner<M> {
             .filter_map(|(_, answer)| answer)
             .collect();
         self.state
-            .record_outputs(conversation, answers, self.model.info());
+            .record_outputs(conversation, answers, &self.model.info());
         Ok(true)
     }
 
@@ -540,12 +547,18 @@ impl<M: Model> Runner<M> {
         let model = &self.model;
         let state = &mut self.state;
         let caps = model.info();
-        let tools = state.definitions(caps);
+        let tools = state.definitions(&caps);
+        let projection = conversation.for_request(&caps);
+        let meta = ItemMeta {
+            turn: Some(conversation.next_turn()),
+            ..ItemMeta::default()
+        };
         let sent = {
-            let request = ModelRequest::new(conversation.items())
+            let request = ModelRequest::new(projection.items())
                 .with_tools(&tools)
                 .with_parallel_tool_calls(state.config.parallel_tool_calls)
-                .with_prompt_cache_key(state.prompt_cache_key());
+                .with_prompt_cache_key(state.prompt_cache_key())
+                .with_settings(state.config.model_settings);
             let call = model.stream(request);
             let cancelled = cancel.cancelled();
             futures::pin_mut!(call, cancelled);
@@ -564,6 +577,20 @@ impl<M: Model> Runner<M> {
         turn.rate_limits = rate_limits.or(turn.rate_limits);
         turn.text.clear();
         let mut calls = 0;
+        // The text written since the last complete assistant message: kept, cut off, when the
+        // response does not finish.
+        let mut partial = String::new();
+        let keep_partial =
+            |partial: &mut String, conversation: &mut Conversation, turn: &mut TurnRecord| {
+                if partial.is_empty() {
+                    return;
+                }
+                let text = std::mem::take(partial);
+                turn.text.push_str(&text);
+                let mut cut = meta.clone().with_interrupted(true);
+                cut.origin.clone_from(&caps.origin);
+                conversation.push(Message::text(Role::Assistant, text).with_meta(cut));
+            };
         let cancelled = cancel.cancelled();
         futures::pin_mut!(cancelled);
         loop {
@@ -579,7 +606,10 @@ impl<M: Model> Runner<M> {
             })
             .await;
             let event = match step {
-                Step::Cancelled => return Ok(AttemptEnd::Cancelled),
+                Step::Cancelled => {
+                    keep_partial(&mut partial, conversation, turn);
+                    return Ok(AttemptEnd::Cancelled);
+                }
                 Step::Answered(finished) => {
                     let index = finished.map_err(Error::from)?;
                     if let Some(answer) = dispatcher.answer(index) {
@@ -587,14 +617,31 @@ impl<M: Model> Runner<M> {
                     }
                     continue;
                 }
-                Step::Event(None) => return Ok(AttemptEnd::Failed(ModelError::stream_ended())),
-                Step::Event(Some(Err(error))) => return Ok(AttemptEnd::Failed(error)),
+                Step::Event(None) => {
+                    keep_partial(&mut partial, conversation, turn);
+                    return Ok(AttemptEnd::Failed(ModelError::stream_ended()));
+                }
+                Step::Event(Some(Err(error))) => {
+                    keep_partial(&mut partial, conversation, turn);
+                    return Ok(AttemptEnd::Failed(error));
+                }
                 Step::Event(Some(Ok(event))) => event,
             };
             on_event(RunEvent::Model(&event));
             match event {
-                ModelEvent::ItemDone(item) => {
-                    calls += state.take_item(item, caps, conversation, dispatcher, turn, on_event);
+                ModelEvent::TextDelta(delta) => partial.push_str(&delta),
+                ModelEvent::ItemDone(mut item) => {
+                    if matches!(&item, Item::Message(message) if message.role == Role::Assistant) {
+                        partial.clear();
+                    }
+                    let item_meta = item.meta_mut();
+                    if item_meta.turn.is_none() {
+                        item_meta.turn = meta.turn;
+                    }
+                    if item_meta.origin.is_none() {
+                        item_meta.origin.clone_from(&caps.origin);
+                    }
+                    calls += state.take_item(item, &caps, conversation, dispatcher, turn, on_event);
                 }
                 ModelEvent::ToolsLoaded(keys) => {
                     for key in keys {
@@ -604,6 +651,12 @@ impl<M: Model> Runner<M> {
                     }
                 }
                 ModelEvent::Completed(response) => {
+                    if response.stop == Some(StopReason::Length) {
+                        // Calls of a response cut off at the output limit are not run, except
+                        // those that started already (their arguments were complete).
+                        dispatcher
+                            .answer_unstarted(|call| ToolOutput::failure(call, CUT_OFF_OUTPUT));
+                    }
                     turn.describe(&response);
                     return Ok(AttemptEnd::Done {
                         incomplete: response.incomplete,
@@ -631,7 +684,7 @@ impl State {
         &self,
         conversation: &mut Conversation,
         answers: Vec<ToolOutput>,
-        caps: ModelInfo,
+        caps: &ModelInfo,
     ) {
         if answers.is_empty() {
             return;
@@ -662,7 +715,7 @@ impl State {
     fn dispatch<F>(
         &mut self,
         call: ToolCall,
-        caps: ModelInfo,
+        caps: &ModelInfo,
         dispatcher: &mut Dispatcher<'_>,
         turn: &mut TurnRecord,
         on_event: &mut F,
@@ -686,7 +739,7 @@ impl State {
     fn take_item<F>(
         &mut self,
         item: Item,
-        caps: ModelInfo,
+        caps: &ModelInfo,
         conversation: &mut Conversation,
         dispatcher: &mut Dispatcher<'_>,
         turn: &mut TurnRecord,
@@ -696,6 +749,16 @@ impl State {
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
         match item {
+            Item::ToolCall(call) if call.meta.interrupted => {
+                // The response stopped in the middle of it: not run.
+                conversation.push_call(&call);
+                on_event(RunEvent::ToolCalled(&call));
+                turn.calls.push(call.clone());
+                let answer = ToolOutput::failure(&call, CUT_OFF_OUTPUT);
+                on_event(RunEvent::ToolAnswered(&answer));
+                dispatcher.push_answered(call, answer);
+                1
+            }
             Item::ToolCall(call) => {
                 conversation.push_call(&call);
                 self.dispatch(call, caps, dispatcher, turn, on_event);
@@ -717,7 +780,7 @@ impl State {
 
     /// The tools of a request: the direct ones and the loaded deferred ones (or every deferred
     /// one, for a model that searches tools itself), and the tool search.
-    fn definitions(&self, caps: ModelInfo) -> Vec<ToolDefinition> {
+    fn definitions(&self, caps: &ModelInfo) -> Vec<ToolDefinition> {
         let native = caps.tool_search;
         let mut tools = self.registry.definitions_where(|key, exposure| {
             if !self.fits(key, caps) {
@@ -748,14 +811,14 @@ impl State {
 
     /// Whether the model can take the tool: namespaced and custom tools only when it takes
     /// them.
-    fn fits(&self, key: &ToolKey, caps: ModelInfo) -> bool {
+    fn fits(&self, key: &ToolKey, caps: &ModelInfo) -> bool {
         (caps.namespaces || key.namespace.is_none())
             && (caps.custom_tools || self.registry.kind(key) != Some(&ToolKind::Custom))
     }
 
     /// Whether the runner answers this call itself: its tool search, when no tool of that name is
     /// registered.
-    fn is_own_search(&self, call: &ToolCall, caps: ModelInfo) -> bool {
+    fn is_own_search(&self, call: &ToolCall, caps: &ModelInfo) -> bool {
         call.name == TOOL_SEARCH
             && call.namespace.is_none()
             && call.kind == ToolKind::Function
@@ -763,7 +826,7 @@ impl State {
     }
 
     /// Whether the runner offers its own `tool_search` function.
-    fn offers_own_search(&self, caps: ModelInfo) -> bool {
+    fn offers_own_search(&self, caps: &ModelInfo) -> bool {
         self.config.tool_search.is_some()
             && !caps.tool_search
             && self.registry.exposure(&ToolKey::new(TOOL_SEARCH)).is_none()
@@ -771,14 +834,14 @@ impl State {
     }
 
     /// The deferred tools a search can find for this model.
-    fn searchable(&self, caps: ModelInfo) -> impl Iterator<Item = &ToolKey> {
+    fn searchable<'s>(&'s self, caps: &'s ModelInfo) -> impl Iterator<Item = &'s ToolKey> + 's {
         self.registry.keys().filter(move |key| {
             self.registry.exposure(key) == Some(Exposure::Deferred) && self.fits(key, caps)
         })
     }
 
     /// Answer the runner's own tool search: load the deferred tools that match the query.
-    fn search(&mut self, call: &ToolCall, caps: ModelInfo) -> ToolOutput {
+    fn search(&mut self, call: &ToolCall, caps: &ModelInfo) -> ToolOutput {
         let Some(config) = &self.config.tool_search else {
             return ToolOutput::failure(call, "tool search is off");
         };

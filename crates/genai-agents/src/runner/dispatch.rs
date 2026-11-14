@@ -170,6 +170,18 @@ impl<'r> Dispatcher<'r> {
             .collect()
     }
 
+    /// Answer the calls that have not started yet with `answer(call)` instead of running them;
+    /// the running ones go on. Returns how many were answered so.
+    pub(super) fn answer_unstarted(&mut self, answer: impl Fn(&ToolCall) -> ToolOutput) -> usize {
+        let unstarted: Vec<usize> = self.queue.drain(..).collect();
+        for &index in &unstarted {
+            let slot = &mut self.slots[index];
+            slot.started = Some(Instant::now());
+            slot.answer = Some(answer(&slot.call));
+        }
+        unstarted.len()
+    }
+
     /// The finished answers, in call order, of a dispatcher stopped by a fatal failure. The
     /// dispatcher is emptied.
     pub(super) fn finished_answers(&mut self) -> Vec<ToolOutput> {

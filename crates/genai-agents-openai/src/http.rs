@@ -1,5 +1,6 @@
-//! Sending a request through the client's HTTP stack, keeping what its response headers say:
-//! the rate limits, and for a failure the delay the server asked for.
+//! Sending a request through the client, the way its own calls go (its interceptors, its HTTP
+//! stack with the retries and the credentials), and keeping what the response said: the rate
+//! limits, and for a failure the delay the server asked for.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
@@ -9,19 +10,17 @@ use genai_agents::{
     ErrorKind, ModelError, ModelEvent, ModelResponse, RateLimitWindow, RateLimits, RetryClass,
     StopReason, Usage,
 };
-use openai_ergonomic::{Client, Error, RateLimitSnapshot};
+use openai_ergonomic::{CallFailure, Client, Error, JsonEventStream, RateLimitSnapshot};
 use serde_json::Value;
-use timvw_rust_runtime::header::{HeaderMap, ACCEPT};
-use timvw_rust_runtime::{Method, Response};
 
 use crate::convert;
 
-/// A [`ModelError`] from openai-ergonomic's error: its retry class, its status and code, and
-/// what the headers of the failed response said.
+/// A [`ModelError`] from openai-ergonomic's error: its retry class, its status and code,
+/// whether it came before the body, and the delay the failed response asked for.
 pub(crate) fn model_error(
     error: Error,
     before_body: bool,
-    headers: Option<&HeaderMap>,
+    retry_after: Option<Duration>,
 ) -> ModelError {
     let retry = match error.retry_class() {
         openai_ergonomic::RetryClass::ServerDirected { after } => {
@@ -41,7 +40,7 @@ pub(crate) fn model_error(
     let mut model = ModelError::from_source(error)
         .with_kind(kind)
         .with_retry_class(retry)
-        .with_retry_after(headers.and_then(retry_after))
+        .with_retry_after(retry_after)
         .with_before_body(before_body);
     if let Some(status) = status {
         model = model.with_status(status);
@@ -50,6 +49,14 @@ pub(crate) fn model_error(
         model = model.with_code(code);
     }
     model
+}
+
+/// A [`ModelError`] from a failed call: its error, whether it came before the body, and the
+/// delay its response asked for.
+pub(crate) fn call_failure(failure: CallFailure) -> ModelError {
+    let before_body = failure.is_before_body();
+    let retry_after = failure.meta().retry_after();
+    model_error(failure.into_error(), before_body, retry_after)
 }
 
 /// The kind of an openai-ergonomic error.
@@ -79,26 +86,9 @@ fn error_kind(error: &Error, status: Option<u16>, code: Option<&str>) -> ErrorKi
     }
 }
 
-/// The delay a failed response asks for before a retry: `retry-after-ms` (milliseconds), else
-/// `retry-after` in seconds (an HTTP date is not read).
-pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let header = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .and_then(|value| value.parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value >= 0.0)
-    };
-    header("retry-after-ms")
-        .map(|millis| millis / 1000.0)
-        .or_else(|| header("retry-after"))
-        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-}
-
-/// The rate limits of a response's headers (`x-ratelimit-*`).
-pub(crate) fn rate_limits(headers: &HeaderMap) -> Option<RateLimits> {
-    let snapshot = RateLimitSnapshot::from_headers(headers)?;
+/// The rate limits a response reported (`x-ratelimit-*`).
+pub(crate) fn rate_limits(snapshot: Option<RateLimitSnapshot>) -> Option<RateLimits> {
+    let snapshot = snapshot?;
     let window = |window: Option<openai_ergonomic::RateLimitWindow>| {
         window.map(|window| RateLimitWindow::new(window.limit, window.remaining, window.reset))
     };
@@ -115,71 +105,40 @@ pub(crate) fn retries_before_body<T>(client: &Client<T>) -> bool {
     client.config().http_client().is_none() && client.config().max_retries() > 0
 }
 
-/// `POST {api_base}{path}` with a JSON body, through the client's HTTP stack (its retries, the
-/// provider's layer with the credentials, layers of the application). A failure to send, and an
-/// error status, are failures before the body.
-pub(crate) async fn post<T>(
+/// `POST {api_base}{path}` with a JSON body, as the client's own calls go: through its
+/// interceptors (named `operation`) and its HTTP stack. The JSON reply and its rate limits.
+pub(crate) async fn call<T>(
     client: &Client<T>,
+    operation: &str,
     path: &str,
     body: &Value,
-    events: bool,
-) -> Result<Response, ModelError> {
-    let base = client
-        .config()
-        .provider()
-        .api_base()
-        .trim_end_matches('/')
-        .to_string();
-    let accept = if events {
-        "text/event-stream"
-    } else {
-        "application/json"
-    };
-    let sent = client
-        .http_client()
-        .request(Method::POST, &format!("{base}{path}"))
-        .header(ACCEPT, accept)
-        .json(body)
-        .send()
-        .await;
-    let response = match sent {
-        Ok(response) => response,
-        Err(error) => return Err(model_error(Error::Http(error), true, None)),
-    };
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-    let headers = response.headers().clone();
-    let message = match response.text().await {
-        Ok(message) => message,
-        Err(error) => return Err(model_error(Error::Http(error), true, Some(&headers))),
-    };
-    let (error_type, error_code) = error_details(&message);
-    let error = Error::api_detailed(status.as_u16(), message, error_type, error_code);
-    Err(model_error(error, true, Some(&headers)))
-}
-
-/// The `type` and `code` of an OpenAI error body: `{"error": {"message", "type", "code"}}`.
-fn error_details(body: &str) -> (Option<String>, Option<String>) {
-    let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return (None, None);
-    };
-    let field = |name: &str| match &value["error"][name] {
-        Value::String(text) => Some(text.clone()),
-        Value::Number(number) => Some(number.to_string()),
-        _ => None,
-    };
-    (field("type"), field("code"))
-}
-
-/// The body of a success, as JSON. A failure to read it is not one before the body.
-pub(crate) async fn json_body(response: Response) -> Result<Value, ModelError> {
-    let text = response
-        .text()
+) -> Result<(Value, Option<RateLimits>), ModelError>
+where
+    T: Default + openai_ergonomic::MaybeSend + openai_ergonomic::MaybeSync + 'static,
+{
+    let response = client
+        .json_call(operation, path, body)
         .await
-        .map_err(|error| model_error(Error::Http(error), false, None))?;
-    serde_json::from_str(&text).map_err(|error| model_error(Error::Json(error), false, None))
+        .map_err(call_failure)?;
+    Ok((response.body, rate_limits(response.meta.rate_limits())))
+}
+
+/// `POST {api_base}{path}` that answers with server-sent events, as for [`call`]. The events
+/// and the rate limits.
+pub(crate) async fn event_call<T>(
+    client: &Client<T>,
+    operation: &str,
+    path: &str,
+    body: &Value,
+) -> Result<(JsonEventStream, Option<RateLimits>), ModelError>
+where
+    T: Default + openai_ergonomic::MaybeSend + openai_ergonomic::MaybeSync + 'static,
+{
+    let (events, meta) = client
+        .json_event_call(operation, path, body)
+        .await
+        .map_err(call_failure)?;
+    Ok((events, rate_limits(meta.rate_limits())))
 }
 
 /// The failure of a failed Responses API response (`status: failed`, or an `error`).
@@ -303,13 +262,8 @@ fn item_events(item: Value) -> Vec<Result<ModelEvent, ModelError>> {
 
 /// The events of a streamed Responses API response.
 pub(crate) fn response_stream(
-    response: Response,
-    idle_timeout: Option<Duration>,
+    events: JsonEventStream,
 ) -> genai_agents::BoxStream<'static, Result<ModelEvent, ModelError>> {
-    let mut events = response.events();
-    if let Some(limit) = idle_timeout {
-        events = events.idle_timeout(limit);
-    }
     let state = StreamState {
         events,
         seen: BTreeSet::new(),
@@ -328,48 +282,26 @@ pub(crate) fn response_stream(
                 None => return None,
                 Some(Err(error)) => {
                     state.done = true;
-                    let error = Error::StreamConnection {
-                        message: format!("Stream connection error: {error}"),
-                    };
                     state
                         .pending
                         .push_back(Err(model_error(error, false, None)));
                 }
-                Some(Ok(event)) => state.read(&event.data),
+                Some(Ok(event)) => state.read(event.0),
             }
         }
     }))
 }
 
 struct StreamState {
-    events: timvw_rust_runtime::sse::Events,
+    events: JsonEventStream,
     seen: BTreeSet<u64>,
     pending: VecDeque<Result<ModelEvent, ModelError>>,
     done: bool,
 }
 
 impl StreamState {
-    /// Read one event's `data:`.
-    fn read(&mut self, data: &str) {
-        if data.trim().is_empty() {
-            return;
-        }
-        if data.trim() == timvw_rust_runtime::sse::DONE {
-            self.done = true;
-            return;
-        }
-        let event: Value = match serde_json::from_str(data) {
-            Ok(event) => event,
-            Err(error) => {
-                let error = Error::StreamParsing {
-                    message: format!("Failed to deserialize event: {error}"),
-                    chunk: data.to_string(),
-                };
-                self.done = true;
-                self.pending.push_back(Err(model_error(error, false, None)));
-                return;
-            }
-        };
+    /// Read one event.
+    fn read(&mut self, event: Value) {
         let kind = event
             .get("type")
             .and_then(Value::as_str)
@@ -452,16 +384,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn reads_retry_after() {
-        let mut headers = HeaderMap::new();
-        assert_eq!(retry_after(&headers), None);
-        headers.insert("retry-after", "2".parse().unwrap());
-        assert_eq!(retry_after(&headers), Some(Duration::from_secs(2)));
-        headers.insert("retry-after-ms", "150".parse().unwrap());
-        assert_eq!(retry_after(&headers), Some(Duration::from_millis(150)));
-    }
 
     #[test]
     fn api_errors_keep_their_class_status_and_code() {
