@@ -24,8 +24,8 @@ already do the hard parts:
 - retries, with the delay the server asked for, without retrying what the client's HTTP layer already retries;
 - deferred tools and tool search; output budgets; rate limits per request.
 
-That code moves here and becomes independent of OpenAI's types. openai-ergonomic keeps its own until genai-agents
-can replace it (see [openai-ergonomic](#openai-ergonomic)).
+That code is copied here and made independent of OpenAI's types. openai-ergonomic keeps its own (see
+[openai-ergonomic](#openai-ergonomic)).
 
 ## Compared with the Agents SDK
 
@@ -93,7 +93,7 @@ pub enum ModelEvent {
 
 ### Tools
 
-The tool framework moves as it is, without the OpenAI types:
+The tool framework comes over as it is, without the OpenAI types:
 
 - `FunctionTool` (typed input and output), `RichTool` (images and files in the output), `CustomTool` (free text),
   dynamic tools for tools known only at run time, namespaces;
@@ -108,7 +108,7 @@ sends (`ToolDefinition`) are neutral; the provider turns them into its own.
 
 `Runner` is `ToolLoop` on a `Model`: the request loop, the call dispatcher, cancellation (`CancellationSignal`),
 retries (`RetryConfig`), iteration limits, deferred tools, events (`RunEvent`) and the outcome (`RunOutcome`,
-`RunStop`, a `TurnRecord` per request). Its behaviour does not change; its tests move with it.
+`RunStop`, a `TurnRecord` per request). Its behaviour does not change; its tests come with it.
 
 ### The agent (slice 3)
 
@@ -190,14 +190,15 @@ On [openai-ergonomic](https://github.com/genai-rs/openai-ergonomic):
 
 ## openai-ergonomic
 
-`ToolLoop` and the tool framework stay in openai-ergonomic until genai-agents 0.1 does everything they do. Then
-openai-ergonomic deprecates them in a minor release, pointing to genai-agents, and removes them in a later one.
-openai-ergonomic does not depend on genai-agents: the dependency goes the other way.
+openai-ergonomic keeps `ToolLoop` and its tool framework: they suit an application that only talks to OpenAI and
+wants no further dependency. genai-agents starts from a copy of that code and goes its own way; a fix to the shared
+behaviour (history repair, the dispatcher, retries) is made in both. openai-ergonomic does not depend on
+genai-agents: the dependency goes the other way.
 
 ## Slices
 
 1. **The core and the OpenAI provider, as `ToolLoop` does today:** items and `Conversation`, `Model`, the tools,
-   the runner; `OpenAiResponses` and `OpenAiChat`. The tests of `ToolLoop` and the tool framework move along and
+   the runner; `OpenAiResponses` and `OpenAiChat`. The tests of `ToolLoop` and the tool framework come along and
    pass. Released as 0.1.
 2. **Sessions and tracing:** the `Session` trait, in memory and SQLite; the spans, with an example that sends a run
    to Langfuse.
