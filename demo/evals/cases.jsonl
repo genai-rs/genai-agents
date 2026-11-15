@@ -1,0 +1,5 @@
+{"id": "paint-date", "input": "When are we painting the kitchen?", "expected": "2026-11-22", "metadata": {"tool": "search_or_read"}}
+{"id": "paint-amount", "input": "How much paint do we need for the kitchen?", "expected": "3", "metadata": {"tool": "search_or_read"}}
+{"id": "trip-where", "input": "Where are we going on the trip to the coast?", "expected": "De Haan", "metadata": {"tool": "search_or_read"}}
+{"id": "plumber", "input": "When is the plumber coming?", "expected": "2026-12-03", "metadata": {"tool": "search_or_read"}}
+{"id": "files", "input": "Which notes do we have? Just list the file names.", "expected": "trip.md", "metadata": {"tool": "list_files"}}
