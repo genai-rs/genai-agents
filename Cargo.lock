@@ -483,6 +483,7 @@ version = "0.2.0"
 dependencies = [
  "futures",
  "genai-agents",
+ "genai-agents-macros",
  "gloo-timers 0.3.0",
  "schemars 1.2.3",
  "serde",
@@ -494,6 +495,20 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-time",
+]
+
+[[package]]
+name = "genai-agents-macros"
+version = "0.1.0"
+dependencies = [
+ "genai-agents",
+ "proc-macro2",
+ "quote",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+ "tokio",
 ]
 
 [[package]]

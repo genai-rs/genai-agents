@@ -19,6 +19,7 @@ APIs that speak it. The [API reference](https://docs.rs/genai-agents) has a comp
 Features:
 
 - `jsonl`: `session::JsonlStore`, sessions in JSON Lines files (not on WebAssembly);
+- `macros`: `#[tool]`, a function tool from an async function (with `schemars`);
 - `schemars`: a tool's parameters schema derived from its input type (`tools::schema::for_type`);
 - `testing`: `testing::ScriptedModel`, a model that answers as a script says, for tests.
 

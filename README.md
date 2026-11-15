@@ -9,6 +9,7 @@ that calls the model in a loop, runs the tools it asks for and sends their outpu
 | Crate | What it holds |
 | --- | --- |
 | [`genai-agents`](crates/genai-agents) | the runner, tools, the conversation and the `Model` trait, independent of the model provider |
+| [`genai-agents-macros`](crates/genai-agents-macros) | `#[tool]`: a function tool from an async function (the `macros` feature of `genai-agents`) |
 | [`genai-agents-openai`](crates/genai-agents-openai) | OpenAI's Responses API and Chat Completions as models, on [openai-ergonomic](https://github.com/genai-rs/openai-ergonomic) |
 | [`genai-agents-sqlite`](crates/genai-agents-sqlite) | sessions in SQLite |
 

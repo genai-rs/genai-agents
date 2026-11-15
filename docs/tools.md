@@ -94,6 +94,50 @@ fn parameters_schema(&self) -> Value {
 }
 ```
 
+## A tool from a function
+
+With the `macros` feature, `#[tool]` makes a function tool from an async function: the function's name is the
+tool's name, its doc comment the description, its parameters the input and the `T` of its `Result<T>` the output.
+It keeps the function and adds a unit struct named after it in UpperCamelCase, to register:
+
+```rust
+use genai_agents::tools::ToolRegistry;
+use genai_agents::{tool, Result, ToolCall};
+
+/// Search the documentation and return matching page titles.
+#[tool(parallel)]
+async fn search(
+    /// What to look for.
+    query: String,
+    /// At most this many results.
+    limit: Option<u32>,
+) -> Result<Vec<String>> {
+    let limit = limit.unwrap_or(3) as usize;
+    Ok(vec![format!("Results for {query}")].into_iter().take(limit).collect())
+}
+
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<()> {
+let mut tools = ToolRegistry::new();
+tools.register(Search)?;
+let answer = tools
+    .answer_call(ToolCall::function("call_1", "search", r#"{"query":"Rust"}"#))
+    .await?;
+assert_eq!(answer.body.as_text(), Some(r#"["Results for Rust"]"#));
+# Ok(())
+# }
+```
+
+The input is a struct the macro writes (`SearchInput`), with a field for each parameter. Its schema is derived with
+`schema::for_type`: the doc comment of a parameter describes its property, an `Option` parameter may be left out,
+and fields the schema does not list are refused. Other attributes of a parameter go to its field, such as
+`#[serde(default)]`. The parameters' own types implement `Deserialize` and `JsonSchema`, the output `Serialize`.
+
+`#[tool(...)]` takes `name = "..."` and `description = "..."` instead of the function's, `parallel`
+(`supports_parallel`) and `untrusted` (`untrusted_output`). A function without a doc comment or description, one
+that is not `async`, a method or a generic function, or one that does not return a `Result<T>` does not compile. A
+tool with state, an output budget or details implements `FunctionTool` itself.
+
 ## Answers and failures
 
 `answer_call` gives an answer to every call it can: the output, or a failure the model can act on, as the output
