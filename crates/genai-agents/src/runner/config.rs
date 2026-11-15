@@ -3,6 +3,7 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use super::context::ContextConfig;
 use crate::model::ModelSettings;
 use crate::tools::TruncationConfig;
 
@@ -172,6 +173,9 @@ pub struct RunConfig {
     /// confidential data, so OpenTelemetry's GenAI conventions advise leaving them out unless
     /// asked for. Default `false`.
     pub trace_content: bool,
+    /// How the runner keeps the conversation within the model's context window: compaction,
+    /// pruning, and the guards against a model that loops. Default [`ContextConfig::default`].
+    pub context: ContextConfig,
 }
 
 impl Default for RunConfig {
@@ -186,6 +190,7 @@ impl Default for RunConfig {
             model_settings: ModelSettings::default(),
             name: None,
             trace_content: false,
+            context: ContextConfig::default(),
         }
     }
 }
@@ -250,6 +255,13 @@ impl RunConfig {
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// How the runner manages the context.
+    #[must_use]
+    pub fn with_context(mut self, context: ContextConfig) -> Self {
+        self.context = context;
         self
     }
 

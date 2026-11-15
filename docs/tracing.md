@@ -12,6 +12,7 @@ The runner opens [`tracing`](https://docs.rs/tracing) spans named and attributed
 | `invoke_agent {name}` | a run | `gen_ai.agent.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.conversation.id` (the session), the tokens of the run |
 | `chat {model}` | a model request, each retry its own | the request's model, output limit and reasoning level; `gen_ai.response.id`, `gen_ai.response.finish_reasons`; the tokens: input, output, cached (`gen_ai.usage.cache_read.input_tokens`), written to the cache, reasoning; `genai_agents.time_to_first_token_ms`; `genai_agents.cache_break` |
 | `execute_tool {tool}` | a tool call, a child of the run | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type` |
+| `compact {model}` | a [compaction](context.md) | the tokens of the summary request; `genai_agents.tokens_before` and `genai_agents.tokens_after` |
 
 `otel.name` carries the names with their model or tool, and `otel.kind` the span kind. A failure sets
 `error.type` (the `ErrorKind`, such as `rate_limit` or `context_overflow`) and `otel.status_code`. A retry is an

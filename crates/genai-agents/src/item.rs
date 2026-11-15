@@ -27,6 +27,10 @@ pub enum Item {
     /// An item only its provider understands, such as a call of a hosted tool (web search, a
     /// tool search, code interpreter), kept as the provider's JSON.
     Provider(ProviderItem),
+    /// A summary that stands in for the conversation before it. The
+    /// [projection](crate::Conversation::for_request) starts at the latest one: the messages it
+    /// kept, its summary, the context it put back, then the items after it.
+    Compaction(Compaction),
 }
 
 impl Item {
@@ -52,6 +56,7 @@ impl Item {
             Self::ToolOutput(output) => &output.meta,
             Self::Reasoning(reasoning) => &reasoning.meta,
             Self::Provider(item) => &item.meta,
+            Self::Compaction(compaction) => &compaction.meta,
         }
     }
 
@@ -63,6 +68,7 @@ impl Item {
             Self::ToolOutput(output) => &mut output.meta,
             Self::Reasoning(reasoning) => &mut reasoning.meta,
             Self::Provider(item) => &mut item.meta,
+            Self::Compaction(compaction) => &mut compaction.meta,
         }
     }
 
@@ -74,8 +80,105 @@ impl Item {
             Self::ToolCall(call) => call.id.as_deref(),
             Self::Reasoning(reasoning) => reasoning.id.as_deref(),
             Self::ToolOutput(output) => output.id.as_deref(),
-            Self::Provider(_) => None,
+            Self::Provider(_) | Self::Compaction(_) => None,
         }
+    }
+}
+
+/// What a compaction sends before the summary it wrote, so that the model reads it as a hand-over.
+pub const SUMMARY_PREFIX: &str = "The conversation so far was summarised to save context. \
+     This summary is what you know of it; continue from it:";
+
+/// A summary that stands in for the conversation before it ([`Item::Compaction`]): what a
+/// compaction wrote, and what it kept of the conversation.
+///
+/// The [projection](crate::Conversation::for_request) of a conversation starts at its latest
+/// compaction and sends, in order: the [`kept`](Self::kept) items (the user's recent messages),
+/// the summary as a user message ([`SUMMARY_PREFIX`], then the summary), the
+/// [`context`](Self::context) items (injected context, such as instructions, put back), then the
+/// items after the compaction. The items before it stay in the conversation, unsent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Compaction {
+    /// The summary of what came before.
+    pub summary: String,
+    /// The items sent before the summary: the user's most recent messages, within a budget.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<Item>,
+    /// The injected context sent after the summary ([`ItemMeta::injected`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<Item>,
+    /// The estimated tokens of the conversation it replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<u64>,
+    /// What is known about it: the model that wrote the summary, the turn.
+    #[serde(default, skip_serializing_if = "ItemMeta::is_empty")]
+    pub meta: ItemMeta,
+}
+
+impl Compaction {
+    /// A summary that keeps nothing else.
+    #[must_use]
+    pub fn new(summary: impl Into<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            kept: Vec::new(),
+            context: Vec::new(),
+            tokens_before: None,
+            meta: ItemMeta::default(),
+        }
+    }
+
+    /// The same compaction, sending these items before the summary.
+    #[must_use]
+    pub fn with_kept(mut self, kept: Vec<Item>) -> Self {
+        self.kept = kept;
+        self
+    }
+
+    /// The same compaction, putting this context back after the summary.
+    #[must_use]
+    pub fn with_context(mut self, context: Vec<Item>) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// The same compaction, with the tokens of what it replaced.
+    #[must_use]
+    pub fn with_tokens_before(mut self, tokens: u64) -> Self {
+        self.tokens_before = Some(tokens);
+        self
+    }
+
+    /// The same compaction, with this metadata.
+    #[must_use]
+    pub fn with_meta(mut self, meta: ItemMeta) -> Self {
+        self.meta = meta;
+        self
+    }
+
+    /// The summary as the message the projection sends: a user message, marked injected.
+    #[must_use]
+    pub fn summary_message(&self) -> Message {
+        Message::text(Role::User, format!("{SUMMARY_PREFIX}\n\n{}", self.summary))
+            .with_meta(ItemMeta::new().with_injected(true))
+    }
+
+    /// The items the projection sends for it, in order: the kept items, the summary message,
+    /// the context.
+    #[must_use]
+    pub fn expand(&self) -> Vec<Item> {
+        let mut items = Vec::with_capacity(self.kept.len() + 1 + self.context.len());
+        items.extend(self.kept.iter().cloned());
+        items.push(Item::Message(self.summary_message()));
+        items.extend(self.context.iter().cloned());
+        items
+    }
+}
+
+impl From<Compaction> for Item {
+    fn from(compaction: Compaction) -> Self {
+        Self::Compaction(compaction)
     }
 }
 

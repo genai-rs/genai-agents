@@ -5,8 +5,8 @@
 
 Agents for Rust, independent of the model provider: typed tools, a provider-independent conversation, and a
 `Runner` that calls a `Model` in a loop, runs the tools it asks for and sends their outputs back until it answers.
-Sessions keep conversations between runs, spans follow OpenTelemetry's GenAI conventions, and recorded runs replay
-in tests.
+Sessions keep conversations between runs, compaction and pruning keep long runs within the context window, spans
+follow OpenTelemetry's GenAI conventions, and recorded runs replay in tests.
 
 ```bash
 cargo add genai-agents genai-agents-openai

@@ -27,6 +27,7 @@
 
 mod cancel;
 mod config;
+mod context;
 mod dispatch;
 mod trace;
 
@@ -42,13 +43,17 @@ use tracing::Instrument;
 
 pub use cancel::CancellationSignal;
 pub use config::{PromptCacheKey, RetryConfig, RunConfig, ToolSearchConfig};
+pub use context::{
+    estimate_tokens, ContextConfig, PruneConfig, RunInput, COMPACTION_PROMPT, INTERRUPTED_NOTE,
+    PRUNED_OUTPUT, REPEATED_FAILURE, TEXT_CALL_NOTE,
+};
 pub use trace::CacheBreak;
 
 use crate::conversation::Conversation;
 use crate::error::{Error, ModelError, Result, RetryClass};
-use crate::item::{Item, ItemMeta, Message, Role, ToolCall, ToolKind, ToolOutput};
+use crate::item::{Compaction, Item, ItemMeta, Message, Role, ToolCall, ToolKind, ToolOutput};
 use crate::model::{
-    Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelStream, RateLimits,
+    fnv1a, Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelStream, RateLimits,
     ReasoningLevel, StopReason, ToolDefinition, Usage,
 };
 use crate::platform::{random_jitter, random_u64, sleep, Instant, MaybeSend};
@@ -98,6 +103,16 @@ pub enum RunEvent<'a> {
     },
     /// A model request and its tool calls are done.
     TurnDone(&'a TurnRecord),
+    /// The conversation was compacted: a summary now stands in for what came before
+    /// ([`Item::Compaction`]).
+    Compacted {
+        /// The estimated tokens before.
+        tokens_before: u64,
+        /// The estimated tokens after.
+        tokens_after: u64,
+    },
+    /// A message of the [`RunInput`] went into the conversation: steering, or a follow-up.
+    Input(&'a Item),
 }
 
 /// One model request of a run and what came of it.
@@ -260,6 +275,17 @@ struct State {
     cache_key: String,
     /// What the previous request sent, for [`TurnRecord::cache_break`].
     last_shape: Option<trace::RequestShape>,
+    /// Messages for the run while it goes.
+    input: RunInput,
+    /// The conversation's length when the last response ended, and the tokens the server
+    /// counted for it then: the base of the token estimate.
+    accounted: Option<(usize, u64)>,
+    /// When the last request was sent: whether the prompt cache may have expired.
+    last_request_at: Option<Instant>,
+    /// The tool outputs, counted in the request, that pruning applies to.
+    prune_boundary: usize,
+    /// The failures of each call (tool and arguments) in this run.
+    failures: std::collections::BTreeMap<(Option<String>, String, u64), u32>,
 }
 
 impl<M: Model> Runner<M> {
@@ -273,6 +299,11 @@ impl<M: Model> Runner<M> {
                 loaded: BTreeSet::new(),
                 cache_key: format!("genai-agents-{:016x}", random_u64()),
                 last_shape: None,
+                input: RunInput::new(),
+                accounted: None,
+                last_request_at: None,
+                prune_boundary: 0,
+                failures: std::collections::BTreeMap::new(),
             },
         }
     }
@@ -323,6 +354,41 @@ impl<M: Model> Runner<M> {
     /// [`load_tool`](Self::load_tool). They stay loaded across runs.
     pub fn loaded_tools(&self) -> impl Iterator<Item = &ToolKey> {
         self.state.loaded.iter()
+    }
+
+    /// The input of the runs: messages the application sends while a run is going (steering,
+    /// follow-ups). Clone it and push from anywhere; see [`RunInput`].
+    #[must_use]
+    pub fn input(&self) -> RunInput {
+        self.state.input.clone()
+    }
+
+    /// The estimated tokens of the next request on `conversation`: what the server counted for
+    /// the last response, plus an [estimate](estimate_tokens) of the items since; an estimate of
+    /// the whole when no response was counted yet.
+    #[must_use]
+    pub fn context_tokens(&self, conversation: &Conversation) -> u64 {
+        self.state.context_tokens(conversation)
+    }
+
+    /// Compact `conversation` now: the model summarises it, and an [`Item::Compaction`] with the
+    /// summary, the user's recent messages and the injected context goes at its end. Requests
+    /// are built from it from then on; the items before it stay, unsent. Returns `false` when
+    /// `cancel` fired first.
+    ///
+    /// The runner compacts by itself ([`ContextConfig`]); this is for the application that
+    /// wants to, such as before handing the conversation to a model with a smaller window.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Compaction`] when the summary is empty or was cut off at the output limit, or
+    /// the error of the request.
+    pub async fn compact(
+        &mut self,
+        conversation: &mut Conversation,
+        cancel: &CancellationSignal,
+    ) -> Result<bool> {
+        self.compact_with(conversation, cancel, &mut |_| {}).await
     }
 
     /// Load a [deferred](Exposure::Deferred) tool: advertise it from the next request on, as if a
@@ -448,6 +514,8 @@ impl<M: Model> Runner<M> {
         let settings = self.turn_settings();
         let mut turns = Vec::new();
         let mut iteration = 0_u32;
+        let mut nudged = false;
+        self.state.failures.clear();
         let result = loop {
             if cancel.is_cancelled() {
                 break Ok(RunOutcome::new(RunStop::Cancelled, turns));
@@ -459,6 +527,19 @@ impl<M: Model> Runner<M> {
                 .is_some_and(|max| iteration >= max.get())
             {
                 break Ok(RunOutcome::new(RunStop::MaxIterations, turns));
+            }
+            for item in self.state.input.take_steering() {
+                on_event(RunEvent::Input(&item));
+                conversation.push(item);
+            }
+            if self.state.over_threshold(conversation, &self.model.info()) {
+                match self.compact_with(conversation, cancel, &mut on_event).await {
+                    Ok(true) => {}
+                    Ok(false) => break Ok(RunOutcome::new(RunStop::Cancelled, turns)),
+                    // The request may still fit; if it does not, the model says so and the
+                    // compaction is tried once more then.
+                    Err(error) => tracing::warn!(error = %error, "the compaction failed"),
+                }
             }
             iteration += 1;
             let mut turn = TurnRecord::new(iteration);
@@ -487,6 +568,9 @@ impl<M: Model> Runner<M> {
                     let answers = dispatcher.abort();
                     self.state
                         .record_outputs(conversation, answers, &self.model.info());
+                    if self.state.config.context.note_interruptions {
+                        conversation.push(context::note(INTERRUPTED_NOTE));
+                    }
                     turns.push(turn);
                     break Ok(RunOutcome::new(RunStop::Cancelled, turns));
                 }
@@ -494,6 +578,13 @@ impl<M: Model> Runner<M> {
                 AttemptEnd::Done { incomplete, calls } => {
                     sink.commit(conversation, turn.usage, &settings).await?;
                     on_event(RunEvent::TurnDone(&turn));
+                    let text_call = calls == 0
+                        && incomplete.is_none()
+                        && self.state.config.context.nudge_text_calls
+                        && !nudged
+                        && context::looks_like_text_call(&turn.text, |name| {
+                            registry.has_tool_named(name)
+                        });
                     turns.push(turn);
                     match incomplete {
                         Some(_) => {
@@ -502,8 +593,21 @@ impl<M: Model> Runner<M> {
                                 turns,
                             ));
                         }
+                        None if text_call => {
+                            // Never run from the text: one more request, to call the tool.
+                            nudged = true;
+                            conversation.push(context::note(TEXT_CALL_NOTE));
+                        }
                         None if calls == 0 => {
-                            break Ok(RunOutcome::new(RunStop::Completed, turns));
+                            let mut more = self.state.input.take_steering();
+                            more.extend(self.state.input.take_follow_ups());
+                            if more.is_empty() {
+                                break Ok(RunOutcome::new(RunStop::Completed, turns));
+                            }
+                            for item in more {
+                                on_event(RunEvent::Input(&item));
+                                conversation.push(item);
+                            }
                         }
                         None => {}
                     }
@@ -554,6 +658,7 @@ impl<M: Model> Runner<M> {
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
         let mut attempt = 0_u32;
+        let mut compacted = false;
         loop {
             on_event(RunEvent::Request {
                 iteration: turn.iteration,
@@ -576,6 +681,17 @@ impl<M: Model> Runner<M> {
             let AttemptEnd::Failed(failure) = end else {
                 return Ok(end);
             };
+            if failure.kind() == crate::error::ErrorKind::ContextOverflow
+                && self.state.config.context.compact_on_overflow
+                && !compacted
+            {
+                compacted = true;
+                tracing::info!(error = %failure, "the context is too long: compacting");
+                if !self.compact_with(conversation, cancel, on_event).await? {
+                    return Ok(AttemptEnd::Cancelled);
+                }
+                continue;
+            }
             let class = failure.retry_class();
             // A failure before the body was already retried by the provider's own HTTP retries,
             // when it has them: retrying it here as well would multiply the requests.
@@ -624,7 +740,7 @@ impl<M: Model> Runner<M> {
     /// Wait for the running calls and record their answers in call order. `false` when
     /// cancelled (the dispatcher keeps its calls, for [`Dispatcher::abort`]).
     async fn drain<F>(
-        &self,
+        &mut self,
         conversation: &mut Conversation,
         dispatcher: &mut Dispatcher<'_>,
         cancel: &CancellationSignal,
@@ -661,6 +777,120 @@ impl<M: Model> Runner<M> {
         self.state
             .record_outputs(conversation, answers, &self.model.info());
         Ok(true)
+    }
+
+    /// [`compact`](Self::compact), with the run's events.
+    async fn compact_with<F>(
+        &mut self,
+        conversation: &mut Conversation,
+        cancel: &CancellationSignal,
+        on_event: &mut F,
+    ) -> Result<bool>
+    where
+        F: FnMut(RunEvent<'_>) + MaybeSend,
+    {
+        let info = self.model.info();
+        let tokens_before = self.state.context_tokens(conversation);
+        let model = info
+            .origin
+            .as_ref()
+            .map(|origin| origin.model.as_str())
+            .unwrap_or_default();
+        let span = tracing::info_span!(
+            "compact",
+            otel.name = trace::span_name("compact", model),
+            otel.status_code = Empty,
+            gen_ai.operation.name = "compact",
+            gen_ai.request.model = (!model.is_empty()).then_some(model),
+            gen_ai.usage.input_tokens = Empty,
+            gen_ai.usage.output_tokens = Empty,
+            genai_agents.tokens_before = tokens_before,
+            genai_agents.tokens_after = Empty,
+            error.type = Empty,
+        );
+        let summary = self
+            .summarise(conversation, &info, cancel)
+            .instrument(span.clone())
+            .await;
+        let summary = match summary {
+            Ok(Some(summary)) => summary,
+            Ok(None) => return Ok(false),
+            Err(error) => {
+                span.record("otel.status_code", "ERROR");
+                span.record("error.type", error_type(&error));
+                return Err(error);
+            }
+        };
+        let active = conversation.active_items();
+        let (kept, context) =
+            context::kept_items(&active, self.state.config.context.keep_user_tokens);
+        let mut meta = ItemMeta::new().with_turn(conversation.next_turn());
+        meta.origin.clone_from(&info.origin);
+        conversation.push(
+            Compaction::new(summary)
+                .with_kept(kept)
+                .with_context(context)
+                .with_tokens_before(tokens_before)
+                .with_meta(meta),
+        );
+        self.state.accounted = None;
+        self.state.prune_boundary = 0;
+        let tokens_after = self.state.context_tokens(conversation);
+        span.record("genai_agents.tokens_after", tokens_after);
+        on_event(RunEvent::Compacted {
+            tokens_before,
+            tokens_after,
+        });
+        Ok(true)
+    }
+
+    /// The model's summary of the conversation; `None` when cancelled. A request too long even
+    /// for that is sent again without its oldest quarter, up to three times.
+    async fn summarise(
+        &self,
+        conversation: &Conversation,
+        info: &ModelInfo,
+        cancel: &CancellationSignal,
+    ) -> Result<Option<String>> {
+        let config = &self.state.config;
+        let mut items = conversation.for_request(info);
+        let prompt = context::note(&config.context.compaction_prompt);
+        let settings = config
+            .context
+            .compaction_settings
+            .unwrap_or(config.model_settings);
+        let mut trimmed = 0;
+        loop {
+            let mut request_items = items.items().to_vec();
+            request_items.push(prompt.clone());
+            let request = ModelRequest::new(&request_items)
+                .with_settings(settings)
+                .with_prompt_cache_key(self.state.prompt_cache_key());
+            let outcome = {
+                let read = read_summary(&self.model, request);
+                let cancelled = cancel.cancelled();
+                futures::pin_mut!(read, cancelled);
+                match futures::future::select(read, cancelled).await {
+                    futures::future::Either::Left((outcome, _)) => outcome,
+                    futures::future::Either::Right(_) => return Ok(None),
+                }
+            };
+            match outcome {
+                Ok(summary) => return Ok(Some(summary)),
+                Err(Error::Model(failure))
+                    if failure.kind() == crate::error::ErrorKind::ContextOverflow
+                        && trimmed < 3
+                        && items.len() > 1 =>
+                {
+                    trimmed += 1;
+                    let target = items.len() - items.len() / 4;
+                    while items.len() > target.max(1) {
+                        items.remove(0);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// One request, in its `chat` span.
@@ -767,7 +997,20 @@ impl<M: Model> Runner<M> {
         let state = &mut self.state;
         let caps = model.info();
         let tools = state.definitions(&caps);
-        let projection = conversation.for_request(&caps);
+        let mut projection = conversation.for_request(&caps);
+        let now = Instant::now();
+        if let Some(prune) = &state.config.context.prune {
+            // Pruning changes the start of the request: only once the cache expired anyway.
+            if state
+                .last_request_at
+                .is_some_and(|at| now.duration_since(at) >= prune.cache_ttl)
+            {
+                state.prune_boundary =
+                    context::outputs(projection.items()).saturating_sub(prune.keep_recent);
+            }
+            context::prune(projection.items_mut(), state.prune_boundary, prune);
+        }
+        state.last_request_at = Some(now);
         let shape = trace::RequestShape::new(
             caps.origin
                 .as_ref()
@@ -915,6 +1158,13 @@ impl<M: Model> Runner<M> {
                             .answer_unstarted(|call| ToolOutput::failure(call, CUT_OFF_OUTPUT));
                     }
                     turn.describe(&response);
+                    if let Some(usage) = response.usage {
+                        let tokens = usage.input_tokens.saturating_add(usage.output_tokens);
+                        state.accounted = Some((
+                            conversation.len(),
+                            u64::try_from(tokens).unwrap_or_default(),
+                        ));
+                    }
                     return Ok(AttemptEnd::Done {
                         incomplete: response.incomplete,
                         calls,
@@ -927,6 +1177,32 @@ impl<M: Model> Runner<M> {
 }
 
 impl State {
+    fn context_tokens(&self, conversation: &Conversation) -> u64 {
+        match self.accounted {
+            Some((len, tokens))
+                if len <= conversation.len()
+                    && conversation.latest_compaction().is_none_or(|at| at < len) =>
+            {
+                tokens + estimate_tokens(&conversation.items()[len..])
+            }
+            _ => estimate_tokens(&conversation.active_items()),
+        }
+    }
+
+    /// Whether the next request passes the share of the context window that triggers a
+    /// compaction, and there is something to compact since the last one.
+    fn over_threshold(&self, conversation: &Conversation, info: &ModelInfo) -> bool {
+        let (Some(percent), Some(window)) = (self.config.context.compact_at, info.context_window)
+        else {
+            return false;
+        };
+        let since = conversation
+            .latest_compaction()
+            .map_or(conversation.len(), |at| conversation.len() - at - 1);
+        since > 0
+            && self.context_tokens(conversation) * 100 >= u64::from(window) * u64::from(percent)
+    }
+
     fn prompt_cache_key(&self) -> Option<&str> {
         match &self.config.prompt_cache_key {
             PromptCacheKey::PerRunner => Some(&self.cache_key),
@@ -938,7 +1214,7 @@ impl State {
     /// Append answers to the history, cut to their tools' budgets (and as a failure when they
     /// hold images or files the model does not take).
     fn record_outputs(
-        &self,
+        &mut self,
         conversation: &mut Conversation,
         answers: Vec<ToolOutput>,
         caps: &ModelInfo,
@@ -954,6 +1230,14 @@ impl State {
             .collect();
         for answer in answers {
             let call = calls.get(&answer.call_id);
+            if let Some(call) = call {
+                let key = failure_key(call);
+                if answer.success {
+                    self.failures.remove(&key);
+                } else {
+                    *self.failures.entry(key).or_default() += 1;
+                }
+            }
             let budget = call.and_then(|call| self.registry.output_budget(call));
             let mut answer = answer.truncated(truncation.budget_for(budget), truncation.header);
             if let (false, Some(call)) = (caps.rich_tool_outputs, call) {
@@ -981,6 +1265,18 @@ impl State {
     {
         on_event(RunEvent::ToolCalled(&call));
         turn.calls.push(call.clone());
+        let max = self.config.context.max_repeated_failures;
+        if max > 0
+            && self
+                .failures
+                .get(&failure_key(&call))
+                .is_some_and(|&failed| failed >= max)
+        {
+            let answer = ToolOutput::failure(&call, REPEATED_FAILURE);
+            on_event(RunEvent::ToolAnswered(&answer));
+            dispatcher.push_answered(call, answer);
+            return;
+        }
         if self.is_own_search(&call, caps) {
             let answer = self.search(&call, caps);
             on_event(RunEvent::ToolAnswered(&answer));
@@ -1216,6 +1512,7 @@ fn error_type(error: &Error) -> &'static str {
         Error::Model(failure) => failure.kind().as_str(),
         Error::Tool(_) => "tool",
         Error::Session(_) => "session",
+        Error::Compaction(_) => "compaction",
         Error::Json(_) => "json",
         _ => "other",
     }
@@ -1231,4 +1528,52 @@ fn stop_name(stop: &StopReason) -> &str {
         StopReason::Aborted => "aborted",
         StopReason::Other(other) => other,
     }
+}
+
+/// The key of a call for the repeated-failure guard: its tool and a hash of its arguments.
+fn failure_key(call: &ToolCall) -> (Option<String>, String, u64) {
+    (
+        call.namespace.clone(),
+        call.name.clone(),
+        fnv1a(call.input.as_bytes()),
+    )
+}
+
+/// Send a compaction request and read the summary from its response.
+async fn read_summary<M: Model>(model: &M, request: ModelRequest<'_>) -> Result<String> {
+    let ModelStream { mut events, .. } = model.stream(request).await?;
+    let mut streamed = String::new();
+    let mut written = String::new();
+    while let Some(event) = futures::StreamExt::next(&mut events).await {
+        match event? {
+            ModelEvent::TextDelta(delta) => streamed.push_str(&delta),
+            ModelEvent::ItemDone(Item::Message(message)) if message.role == Role::Assistant => {
+                written.push_str(&message.text_content());
+            }
+            ModelEvent::Completed(response) => {
+                if response.stop == Some(StopReason::Length) || response.incomplete.is_some() {
+                    return Err(Error::Compaction(
+                        "the summary was cut off before it was complete".into(),
+                    ));
+                }
+                if let Some(usage) = response.usage {
+                    let span = tracing::Span::current();
+                    span.record("gen_ai.usage.input_tokens", usage.input_tokens);
+                    span.record("gen_ai.usage.output_tokens", usage.output_tokens);
+                }
+                let summary = if written.is_empty() {
+                    streamed
+                } else {
+                    written
+                };
+                let summary = summary.trim();
+                if summary.is_empty() {
+                    return Err(Error::Compaction("the summary is empty".into()));
+                }
+                return Ok(summary.to_owned());
+            }
+            _ => {}
+        }
+    }
+    Err(Error::Model(ModelError::stream_ended()))
 }

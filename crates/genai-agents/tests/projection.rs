@@ -334,11 +334,18 @@ async fn a_cancelled_response_keeps_its_partial_text_cut_off() {
         .unwrap();
     assert_eq!(outcome.stop, RunStop::Cancelled);
     assert_eq!(outcome.output_text(), "Once upon");
-    let Some(Item::Message(partial)) = conversation.items().last() else {
+    // The partial text, then the note that the run was interrupted.
+    let items = conversation.items();
+    let Item::Message(partial) = &items[items.len() - 2] else {
         panic!("the partial text expected");
     };
     assert_eq!(partial.text_content(), "Once upon");
     assert!(partial.meta.interrupted);
+    let Some(Item::Message(note)) = items.last() else {
+        panic!("the note expected");
+    };
+    assert_eq!(note.text_content(), genai_agents::INTERRUPTED_NOTE);
+    assert!(note.meta.injected);
 
     // The next run does not send it.
     conversation.push_user("Go on.");

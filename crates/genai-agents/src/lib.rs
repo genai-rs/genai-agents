@@ -13,6 +13,8 @@
 //! - [`Runner`]: the loop, with concurrent tool calls started while the response streams,
 //!   cancellation, retries, iteration limits and tool search; traced with OpenTelemetry's GenAI
 //!   conventions (`invoke_agent`, `chat` and `execute_tool` spans).
+//! - Context management ([`ContextConfig`]): compaction into a summary, pruning of old tool
+//!   outputs, input while a run is going ([`RunInput`]), and guards against a model that loops.
 //! - [`session`]: conversations kept between runs as an append-only log, with rollback, forks
 //!   and guarded writes ([`Runner::run_session`]).
 //! - [`record`]: a model that records its requests and responses, and one that replays them, for
@@ -88,6 +90,7 @@
 //!
 //! The guides go further: [the runner](https://github.com/genai-rs/genai-agents/blob/main/docs/runner.md),
 //! [tools](https://github.com/genai-rs/genai-agents/blob/main/docs/tools.md),
+//! [context management](https://github.com/genai-rs/genai-agents/blob/main/docs/context.md),
 //! [sessions](https://github.com/genai-rs/genai-agents/blob/main/docs/sessions.md),
 //! [tracing](https://github.com/genai-rs/genai-agents/blob/main/docs/tracing.md) and
 //! [recorded runs](https://github.com/genai-rs/genai-agents/blob/main/docs/recording.md).
@@ -110,8 +113,8 @@ pub mod tools;
 pub use conversation::{Conversation, NormalizeReport, ProjectionReport, IMAGE_OMITTED};
 pub use error::{BoxError, Error, ErrorKind, ModelError, Result, RetryClass};
 pub use item::{
-    Content, ImageDetail, Item, ItemMeta, Message, Origin, ProviderItem, Reasoning, Role, ToolCall,
-    ToolKind, ToolOutput, ToolOutputBody, ABORTED_OUTPUT,
+    Compaction, Content, ImageDetail, Item, ItemMeta, Message, Origin, ProviderItem, Reasoning,
+    Role, ToolCall, ToolKind, ToolOutput, ToolOutputBody, ABORTED_OUTPUT, SUMMARY_PREFIX,
 };
 pub use model::{
     CallIds, Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelSettings, ModelStream,
@@ -119,8 +122,10 @@ pub use model::{
 };
 pub use platform::{BoxFuture, BoxStream, MaybeSend, MaybeSync};
 pub use runner::{
-    CacheBreak, CancellationSignal, PromptCacheKey, RetryConfig, RunConfig, RunEvent, RunOutcome,
-    RunStop, Runner, ToolSearchConfig, TurnRecord, CUT_OFF_OUTPUT, TOOL_SEARCH,
+    estimate_tokens, CacheBreak, CancellationSignal, ContextConfig, PromptCacheKey, PruneConfig,
+    RetryConfig, RunConfig, RunEvent, RunInput, RunOutcome, RunStop, Runner, ToolSearchConfig,
+    TurnRecord, COMPACTION_PROMPT, CUT_OFF_OUTPUT, INTERRUPTED_NOTE, PRUNED_OUTPUT,
+    REPEATED_FAILURE, TEXT_CALL_NOTE, TOOL_SEARCH,
 };
 pub use tools::ToolRegistry;
 
@@ -128,6 +133,11 @@ pub use tools::ToolRegistry;
 #[cfg(doctest)]
 #[doc = include_str!("../../../docs/sessions.md")]
 pub struct SessionsGuide;
+
+/// The examples of the context guide (`docs/context.md`), compiled and run as doc tests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/context.md")]
+pub struct ContextGuide;
 
 /// The examples of the recorded runs guide (`docs/recording.md`), compiled as doc tests.
 #[cfg(doctest)]

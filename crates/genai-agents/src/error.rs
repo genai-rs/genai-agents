@@ -35,6 +35,9 @@ pub enum Error {
     /// JSON that could not be encoded or decoded.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// A compaction did not give a usable summary: it was empty, or cut off at the output limit.
+    #[error("compaction failed: {0}")]
+    Compaction(String),
     /// A session could not be read or written.
     #[error(transparent)]
     Session(#[from] crate::session::SessionError),
