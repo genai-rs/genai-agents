@@ -34,7 +34,8 @@ What works today:
 - evals: scorers of the answer, the trajectory and the cost, repeated runs, baselines for CI, Langfuse dataset runs;
 - natively and on WebAssembly (MCP natively only).
 
-The [design](docs/design.md) describes the whole and where it comes from.
+The [design](docs/design.md) describes the whole and where it comes from. The [demo](demo/README.md) is a
+small assistant that puts most of it to work, with an eval.
 
 - [The runner](docs/runner.md)
 - [Tools](docs/tools.md)
