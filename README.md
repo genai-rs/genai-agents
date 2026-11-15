@@ -26,10 +26,11 @@ What works today:
 - recorded runs, replayed in tests without a network;
 - context management: compaction, pruning of old tool outputs, input while a run is going, guards against loops;
 - agents: instructions, a context, hooks, input and output guardrails, structured output, a tool policy;
+- approvals that stop a run and resume it, handoffs, agents as tools, sub-agents in the background;
 - evals: scorers of the answer, the trajectory and the cost, repeated runs, baselines for CI, Langfuse dataset runs;
 - natively and on WebAssembly.
 
-Approvals and handoffs, MCP and skills come next: see the [design](docs/design.md).
+MCP, skills and fallback models come next: see the [design](docs/design.md).
 
 - [The runner](docs/runner.md)
 - [Tools](docs/tools.md)

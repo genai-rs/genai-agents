@@ -25,6 +25,8 @@
 //! Nothing is spawned: the calls run on the run's own task, so the runner needs no runtime of
 //! its own and runs on WebAssembly with tools that are not `Send`.
 
+mod approval;
+mod background;
 mod cancel;
 mod config;
 mod context;
@@ -43,6 +45,8 @@ use serde_json::{json, Value};
 use tracing::field::Empty;
 use tracing::Instrument;
 
+pub use approval::{Approval, ApprovalDecision, ApprovalPolicy, AskFor, Decision, PendingCall};
+pub(crate) use background::{Background, NoBackground};
 pub use cancel::CancellationSignal;
 pub use config::{PromptCacheKey, RetryConfig, RunConfig, ToolSearchConfig};
 pub(crate) use context::note as note_item;
@@ -51,6 +55,22 @@ pub use context::{
     PRUNED_OUTPUT, REPEATED_FAILURE, TEXT_CALL_NOTE,
 };
 pub(crate) use hooks::{Bound, NoHooks, RunHooks};
+
+/// What an agent adds to a run of its runner: hooks, and background work.
+pub(crate) struct Extras<'x> {
+    pub(crate) hooks: &'x dyn RunHooks,
+    pub(crate) background: &'x dyn Background,
+}
+
+impl Extras<'static> {
+    /// Nothing: a plain run.
+    pub(crate) fn none() -> Self {
+        Extras {
+            hooks: &NoHooks,
+            background: &NoBackground,
+        }
+    }
+}
 pub use hooks::{CallDecision, Hooks, RequestPlan};
 pub use policy::ToolPolicy;
 pub use trace::CacheBreak;
@@ -195,6 +215,18 @@ pub enum RunStop {
         /// Why it stopped.
         reason: Option<String>,
     },
+    /// Calls wait for a person's approval ([`ApprovalPolicy`]); the others of the response
+    /// were answered. Resume with the decisions ([`Runner::resume`]).
+    Approval {
+        /// The calls, in order.
+        pending: Vec<PendingCall>,
+    },
+    /// The model handed the conversation over to another agent
+    /// ([`Agent::handoff`](crate::agent::Agent::handoff)).
+    Handoff {
+        /// The agent's name.
+        to: String,
+    },
     /// A guardrail tripped ([`Agent`](crate::agent::Agent)).
     Guardrail {
         /// The guardrail's name.
@@ -244,6 +276,8 @@ impl RunOutcome {
 enum Step {
     Event(Option<Result<ModelEvent, ModelError>>),
     Answered(std::result::Result<usize, ToolError>),
+    /// Background work finished: its result goes in after the turn.
+    Arrived(Item),
     Cancelled,
 }
 
@@ -278,6 +312,16 @@ pub struct Runner<M> {
     state: State,
 }
 
+/// The approval policy, shown by its presence in `Debug`.
+#[derive(Clone)]
+struct Policy(Arc<dyn ApprovalPolicy>);
+
+impl std::fmt::Debug for Policy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApprovalPolicy")
+    }
+}
+
 /// Everything of a runner but its model, so that a response (which borrows the model) can be read
 /// while the state changes.
 #[derive(Debug)]
@@ -299,6 +343,20 @@ struct State {
     prune_boundary: usize,
     /// The failures of each call (tool and arguments) in this run.
     failures: std::collections::BTreeMap<(Option<String>, String, u64), u32>,
+    /// Who decides whether a call may run.
+    approvals: Option<Policy>,
+    /// The keys approved for the session.
+    approved_keys: BTreeSet<String>,
+    /// The calls of this turn waiting for approval.
+    pending: Vec<PendingCall>,
+    /// The agents the model can hand over to: the tool's name, the agent's, the description.
+    handoffs: Vec<(String, String, String)>,
+    /// The agent a call of this turn handed over to.
+    handoff_to: Option<String>,
+    /// The results of background work that finished, to go in before the next request.
+    arrived: Vec<Item>,
+    /// Policies a tool must pass besides the configuration's ([`Runner::restrict`]).
+    restrictions: Vec<ToolPolicy>,
 }
 
 impl<M: Model> Runner<M> {
@@ -317,6 +375,13 @@ impl<M: Model> Runner<M> {
                 last_request_at: None,
                 prune_boundary: 0,
                 failures: std::collections::BTreeMap::new(),
+                approvals: None,
+                approved_keys: BTreeSet::new(),
+                pending: Vec::new(),
+                handoffs: Vec::new(),
+                handoff_to: None,
+                arrived: Vec::new(),
+                restrictions: Vec::new(),
             },
         }
     }
@@ -372,6 +437,165 @@ impl<M: Model> Runner<M> {
     /// [`load_tool`](Self::load_tool). They stay loaded across runs.
     pub fn loaded_tools(&self) -> impl Iterator<Item = &ToolKey> {
         self.state.loaded.iter()
+    }
+
+    /// The same runner, asking `policy` before a call runs: a call it asks a person about
+    /// stops the run with [`RunStop::Approval`], to [resume](Self::resume) with the decisions.
+    #[must_use]
+    pub fn with_approvals(mut self, policy: impl ApprovalPolicy + 'static) -> Self {
+        self.set_approvals(policy);
+        self
+    }
+
+    /// Narrow the tools the runs may use: a tool must pass this policy as well as the
+    /// configuration's ([`RunConfig::tool_policy`]); a sub-agent gets its parent's this way.
+    pub fn restrict(&mut self, policy: ToolPolicy) {
+        if !policy.is_open() {
+            self.state.restrictions.push(policy);
+        }
+    }
+
+    /// Every policy a tool must pass: the configuration's, then the restrictions.
+    #[must_use]
+    pub fn policies(&self) -> Vec<ToolPolicy> {
+        let mut policies = vec![self.state.config.tool_policy.clone()];
+        policies.extend(self.state.restrictions.iter().cloned());
+        policies.retain(|policy| !policy.is_open());
+        policies
+    }
+
+    /// Ask `policy` before a call runs ([`with_approvals`](Self::with_approvals)).
+    pub fn set_approvals(&mut self, policy: impl ApprovalPolicy + 'static) {
+        self.state.approvals = Some(Policy(Arc::new(policy)));
+    }
+
+    /// The keys approved for the session ([`PendingCall::approve_for_session`]): to keep with
+    /// the session, and give back with [`approve_key`](Self::approve_key) to a new runner.
+    pub fn approved_keys(&self) -> impl Iterator<Item = &str> {
+        self.state.approved_keys.iter().map(String::as_str)
+    }
+
+    /// Approve calls with this key without asking.
+    pub fn approve_key(&mut self, key: impl Into<String>) {
+        self.state.approved_keys.insert(key.into());
+    }
+
+    /// Offer the model a tool that hands the conversation over to the agent `agent`: a call of
+    /// it ends the run with [`RunStop::Handoff`]. [`Agent::handoff`](crate::agent::Agent::handoff)
+    /// uses it and runs the other agent.
+    pub fn add_handoff(&mut self, agent: impl Into<String>, description: impl Into<String>) {
+        let agent = agent.into();
+        let tool = format!(
+            "transfer_to_{}",
+            crate::tools::sanitize_tool_name(&agent).to_lowercase()
+        );
+        self.state.handoffs.retain(|(name, _, _)| *name != tool);
+        self.state.handoffs.push((tool, agent, description.into()));
+    }
+
+    /// Resume a run that stopped for approvals ([`RunStop::Approval`]) with the decisions:
+    /// the approved calls run, the denied ones are answered with the reason, and the run goes on
+    /// as [`run_with`](Self::run_with) does. An abort answers every pending call `"aborted"` and
+    /// ends the run ([`RunStop::Cancelled`]). A pending call without a decision is left
+    /// unanswered (the next request answers it `"aborted"`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Approval`] when a decision names a call that is not waiting in `conversation`,
+    /// or whose arguments changed since; as [`run_with`](Self::run_with).
+    pub async fn resume<F>(
+        &mut self,
+        conversation: &mut Conversation,
+        approvals: &[Approval],
+        cancel: &CancellationSignal,
+        on_event: F,
+    ) -> Result<RunOutcome>
+    where
+        F: FnMut(RunEvent<'_>) + MaybeSend,
+    {
+        if self
+            .apply(conversation, approvals, cancel, &NoHooks)
+            .await?
+        {
+            return Ok(RunOutcome::new(RunStop::Cancelled, Vec::new()));
+        }
+        self.run_with(conversation, cancel, on_event).await
+    }
+
+    /// Apply approval decisions: run the approved calls, answer the denied ones. Returns whether
+    /// the run was aborted.
+    pub(crate) async fn apply(
+        &mut self,
+        conversation: &mut Conversation,
+        approvals: &[Approval],
+        cancel: &CancellationSignal,
+        hooks: &dyn RunHooks,
+    ) -> Result<bool> {
+        let waiting = conversation.unanswered_calls();
+        let mut chosen = Vec::new();
+        for approval in approvals {
+            let call = waiting
+                .iter()
+                .find(|call| call.call_id == approval.call_id)
+                .ok_or_else(|| {
+                    Error::Approval(format!("no call {} is waiting", approval.call_id))
+                })?;
+            if approval::arguments_hash(&call.input) != approval.hash {
+                return Err(Error::Approval(format!(
+                    "the arguments of call {} changed since it was pending",
+                    approval.call_id
+                )));
+            }
+            chosen.push((call.clone(), &approval.decision));
+        }
+        if chosen
+            .iter()
+            .any(|(_, decision)| matches!(decision, Decision::Abort))
+        {
+            for (call, _) in &chosen {
+                conversation.push_output(&ToolOutput::aborted(call));
+            }
+            return Ok(true);
+        }
+        let registry = Arc::clone(&self.state.registry);
+        let span = tracing::Span::current();
+        let mut dispatcher = Dispatcher::new(
+            &registry,
+            span,
+            self.state.config.trace_content,
+            hooks,
+            None,
+        );
+        for (call, decision) in chosen {
+            match decision {
+                Decision::Deny(reason) => {
+                    let answer = ToolOutput::failure(&call, format!("denied: {reason}"));
+                    dispatcher.push_answered(call, answer);
+                }
+                Decision::ApproveForSession => {
+                    if let Some(policy) = &self.state.approvals {
+                        self.state.approved_keys.insert(policy.0.key(&call));
+                    }
+                    dispatcher.push(call, false, false);
+                }
+                _ => dispatcher.push(call, false, false),
+            }
+        }
+        if !self
+            .drain(
+                conversation,
+                &mut dispatcher,
+                cancel,
+                &mut |_| {},
+                &NoBackground,
+            )
+            .await?
+        {
+            let answers = dispatcher.abort();
+            self.state
+                .record_outputs(conversation, answers, &self.model.info());
+        }
+        Ok(false)
     }
 
     /// The input of the runs: messages the application sends while a run is going (steering,
@@ -450,9 +674,16 @@ impl<M: Model> Runner<M> {
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
         let span = self.run_span(None);
-        self.run_inner(conversation, cancel, on_event, &mut NoSink, &span, &NoHooks)
-            .instrument(span.clone())
-            .await
+        self.run_inner(
+            conversation,
+            cancel,
+            on_event,
+            &mut NoSink,
+            &span,
+            &Extras::none(),
+        )
+        .instrument(span.clone())
+        .await
     }
 
     /// Run on a [`Session`]: on its [conversation](Session::conversation), as
@@ -492,7 +723,7 @@ impl<M: Model> Runner<M> {
             on_event,
             &mut sink,
             &span,
-            &NoHooks,
+            &Extras::none(),
         )
         .instrument(span.clone())
         .await
@@ -531,13 +762,15 @@ impl<M: Model> Runner<M> {
         mut on_event: F,
         sink: &mut K,
         span: &tracing::Span,
-        hooks: &dyn RunHooks,
+        ext: &Extras<'_>,
     ) -> Result<RunOutcome>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
         K: Sink,
     {
+        let hooks = ext.hooks;
         let registry = Arc::clone(&self.state.registry);
+        let policy = self.state.approvals.clone();
         let settings = self.turn_settings();
         let mut turns = Vec::new();
         let mut iteration = 0_u32;
@@ -555,7 +788,9 @@ impl<M: Model> Runner<M> {
             {
                 break Ok(RunOutcome::new(RunStop::MaxIterations, turns));
             }
-            for item in self.state.input.take_steering() {
+            let mut input = std::mem::take(&mut self.state.arrived);
+            input.extend(self.state.input.take_steering());
+            for item in input {
                 on_event(RunEvent::Input(&item));
                 conversation.push(item);
             }
@@ -578,6 +813,7 @@ impl<M: Model> Runner<M> {
                 span.clone(),
                 self.state.config.trace_content,
                 hooks,
+                policy.as_ref().map(|policy| &*policy.0),
             );
             let end = self
                 .turn(
@@ -586,7 +822,7 @@ impl<M: Model> Runner<M> {
                     &mut turn,
                     cancel,
                     &mut on_event,
-                    hooks,
+                    ext,
                 )
                 .await;
             let end = match end {
@@ -613,6 +849,15 @@ impl<M: Model> Runner<M> {
                 AttemptEnd::Done { incomplete, calls } => {
                     sink.commit(conversation, turn.usage, &settings).await?;
                     on_event(RunEvent::TurnDone(&turn));
+                    if !self.state.pending.is_empty() {
+                        let pending = std::mem::take(&mut self.state.pending);
+                        turns.push(turn);
+                        break Ok(RunOutcome::new(RunStop::Approval { pending }, turns));
+                    }
+                    if let Some(to) = self.state.handoff_to.take() {
+                        turns.push(turn);
+                        break Ok(RunOutcome::new(RunStop::Handoff { to }, turns));
+                    }
                     let text_call = calls == 0
                         && incomplete.is_none()
                         && self.state.config.context.nudge_text_calls
@@ -636,6 +881,27 @@ impl<M: Model> Runner<M> {
                         None if calls == 0 => {
                             let mut more = self.state.input.take_steering();
                             more.extend(self.state.input.take_follow_ups());
+                            more.splice(0..0, std::mem::take(&mut self.state.arrived));
+                            if more.is_empty() && ext.background.running() > 0 {
+                                // Work still running: its result is the next input.
+                                let arrived = {
+                                    let cancelled = cancel.cancelled();
+                                    futures::pin_mut!(cancelled);
+                                    futures::future::poll_fn(|cx| {
+                                        if cancelled.as_mut().poll(cx).is_ready() {
+                                            return Poll::Ready(None);
+                                        }
+                                        ext.background.poll_finished(cx).map(Some)
+                                    })
+                                    .await
+                                };
+                                match arrived {
+                                    Some(item) => more.push(item),
+                                    None => {
+                                        break Ok(RunOutcome::new(RunStop::Cancelled, turns));
+                                    }
+                                }
+                            }
                             if more.is_empty() && !hooks.is_empty() {
                                 more = match hooks.on_stop(conversation).await {
                                     Ok(more) => more,
@@ -694,11 +960,12 @@ impl<M: Model> Runner<M> {
         turn: &mut TurnRecord,
         cancel: &CancellationSignal,
         on_event: &mut F,
-        hooks: &dyn RunHooks,
+        ext: &Extras<'_>,
     ) -> Result<AttemptEnd>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
+        let hooks = ext.hooks;
         let mut attempt = 0_u32;
         let mut compacted = false;
         loop {
@@ -707,7 +974,7 @@ impl<M: Model> Runner<M> {
                 attempt,
             });
             let end = self
-                .attempt(conversation, dispatcher, turn, cancel, on_event, hooks)
+                .attempt(conversation, dispatcher, turn, cancel, on_event, ext)
                 .await?;
             if matches!(end, AttemptEnd::Cancelled) {
                 return Ok(end);
@@ -715,7 +982,7 @@ impl<M: Model> Runner<M> {
             // The calls of this attempt (a failed one included) are answered before anything
             // else: the next request carries them.
             if !self
-                .drain(conversation, dispatcher, cancel, on_event)
+                .drain(conversation, dispatcher, cancel, on_event, ext.background)
                 .await?
             {
                 return Ok(AttemptEnd::Cancelled);
@@ -790,19 +1057,35 @@ impl<M: Model> Runner<M> {
         dispatcher: &mut Dispatcher<'_>,
         cancel: &CancellationSignal,
         on_event: &mut F,
+        background: &dyn Background,
     ) -> Result<bool>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
         while !dispatcher.is_idle() {
             let step = {
-                let finished = dispatcher.finished();
                 let cancelled = cancel.cancelled();
-                futures::pin_mut!(finished, cancelled);
-                match futures::future::select(finished, cancelled).await {
-                    futures::future::Either::Left((finished, _)) => Some(finished),
-                    futures::future::Either::Right(_) => None,
+                futures::pin_mut!(cancelled);
+                // Cancellation first, then the calls, then background work (kept going).
+                futures::future::poll_fn(|cx| {
+                    if cancelled.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(Step::Cancelled);
+                    }
+                    if let Poll::Ready(finished) = dispatcher.poll_finished(cx) {
+                        return Poll::Ready(Step::Answered(finished));
+                    }
+                    background.poll_finished(cx).map(Step::Arrived)
+                })
+                .await
+            };
+            let step = match step {
+                Step::Cancelled => None,
+                Step::Arrived(item) => {
+                    self.state.arrived.push(item);
+                    continue;
                 }
+                Step::Answered(finished) => Some(finished),
+                Step::Event(_) => continue,
             };
             match step {
                 None => return Ok(false),
@@ -813,6 +1096,14 @@ impl<M: Model> Runner<M> {
                     }
                 }
             }
+        }
+        if let Some(policy) = &self.state.approvals {
+            let pending = dispatcher.pending();
+            self.state.pending.extend(
+                pending
+                    .iter()
+                    .map(|call| PendingCall::new(call, policy.0.key(call))),
+            );
         }
         let answers = dispatcher
             .take()
@@ -951,7 +1242,7 @@ impl<M: Model> Runner<M> {
         turn: &mut TurnRecord,
         cancel: &CancellationSignal,
         on_event: &mut F,
-        hooks: &dyn RunHooks,
+        ext: &Extras<'_>,
     ) -> Result<AttemptEnd>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
@@ -989,7 +1280,7 @@ impl<M: Model> Runner<M> {
         );
         let before = conversation.len();
         let end = self
-            .attempt_inner(conversation, dispatcher, turn, cancel, on_event, hooks)
+            .attempt_inner(conversation, dispatcher, turn, cancel, on_event, ext)
             .instrument(span.clone())
             .await;
         if let Some(id) = &turn.response_id {
@@ -1040,17 +1331,22 @@ impl<M: Model> Runner<M> {
         turn: &mut TurnRecord,
         cancel: &CancellationSignal,
         on_event: &mut F,
-        hooks: &dyn RunHooks,
+        ext: &Extras<'_>,
     ) -> Result<AttemptEnd>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
+        let hooks = ext.hooks;
         let model = &self.model;
         let state = &mut self.state;
         let caps = model.info();
         let mut plan = RequestPlan {
             settings: state.config.model_settings,
-            tools: state.definitions(&caps),
+            tools: {
+                let mut tools = state.definitions(&caps);
+                tools.extend(ext.background.definitions());
+                tools
+            },
             instructions: state.config.instructions.clone(),
             output: state.config.output.clone(),
         };
@@ -1152,6 +1448,9 @@ impl<M: Model> Runner<M> {
                 if let Poll::Ready(finished) = dispatcher.poll_finished(cx) {
                     return Poll::Ready(Step::Answered(finished));
                 }
+                if let Poll::Ready(item) = ext.background.poll_finished(cx) {
+                    return Poll::Ready(Step::Arrived(item));
+                }
                 events.as_mut().poll_next(cx).map(Step::Event)
             })
             .await;
@@ -1165,6 +1464,10 @@ impl<M: Model> Runner<M> {
                     if let Some(answer) = dispatcher.answer(index) {
                         on_event(RunEvent::ToolAnswered(answer));
                     }
+                    continue;
+                }
+                Step::Arrived(item) => {
+                    state.arrived.push(item);
                     continue;
                 }
                 Step::Event(None) => {
@@ -1204,7 +1507,15 @@ impl<M: Model> Runner<M> {
                     if item_meta.origin.is_none() {
                         item_meta.origin.clone_from(&caps.origin);
                     }
-                    calls += state.take_item(item, &caps, conversation, dispatcher, turn, on_event);
+                    calls += state.take_item(
+                        item,
+                        &caps,
+                        conversation,
+                        dispatcher,
+                        turn,
+                        on_event,
+                        ext.background,
+                    );
                 }
                 ModelEvent::ToolsLoaded(keys) => {
                     for key in keys {
@@ -1316,6 +1627,7 @@ impl State {
     }
 
     /// Queue a call of the model (or answer it, for the runner's own tool search).
+    #[allow(clippy::too_many_arguments)]
     fn dispatch<F>(
         &mut self,
         call: ToolCall,
@@ -1323,6 +1635,7 @@ impl State {
         dispatcher: &mut Dispatcher<'_>,
         turn: &mut TurnRecord,
         on_event: &mut F,
+        background: &dyn Background,
     ) where
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
@@ -1340,8 +1653,7 @@ impl State {
             dispatcher.push_answered(call, answer);
             return;
         }
-        if !self.config.tool_policy.permits(&ToolKey::of(&call)) && !self.is_own_search(&call, caps)
-        {
+        if !self.permits(&ToolKey::of(&call)) && !self.is_own_search(&call, caps) {
             let answer = ToolOutput::failure(
                 &call,
                 format!("the tool `{}` is not allowed in this run", call.name),
@@ -1356,12 +1668,35 @@ impl State {
             dispatcher.push_answered(call, answer);
             return;
         }
+        if call.namespace.is_none() {
+            if let Some(answer) = background.start(&call) {
+                on_event(RunEvent::ToolAnswered(&answer));
+                dispatcher.push_answered(call, answer);
+                return;
+            }
+        }
+        if let Some((_, agent, _)) = self
+            .handoffs
+            .iter()
+            .find(|(tool, _, _)| *tool == call.name && call.namespace.is_none())
+        {
+            let answer = ToolOutput::new(&call, format!("Transferred to {agent}."), true);
+            self.handoff_to = Some(agent.clone());
+            on_event(RunEvent::ToolAnswered(&answer));
+            dispatcher.push_answered(call, answer);
+            return;
+        }
         let parallel = self.config.parallel_tool_calls && self.registry.supports_parallel(&call);
-        dispatcher.push(call, parallel);
+        let check = self
+            .approvals
+            .as_ref()
+            .is_some_and(|policy| !self.approved_keys.contains(&policy.0.key(&call)));
+        dispatcher.push(call, parallel, check);
     }
 
     /// Record an output item of a response, and dispatch it when it is a call. Returns the
     /// number of calls (0 or 1).
+    #[allow(clippy::too_many_arguments)]
     fn take_item<F>(
         &mut self,
         item: Item,
@@ -1370,6 +1705,7 @@ impl State {
         dispatcher: &mut Dispatcher<'_>,
         turn: &mut TurnRecord,
         on_event: &mut F,
+        background: &dyn Background,
     ) -> usize
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
@@ -1387,7 +1723,7 @@ impl State {
             }
             Item::ToolCall(call) => {
                 conversation.push_call(&call);
-                self.dispatch(call, caps, dispatcher, turn, on_event);
+                self.dispatch(call, caps, dispatcher, turn, on_event, background);
                 1
             }
             Item::Message(message) => {
@@ -1422,6 +1758,18 @@ impl State {
         if native && self.searchable(caps).next().is_some() {
             tools.push(ToolDefinition::ToolSearch);
         }
+        for (tool, agent, description) in &self.handoffs {
+            tools.push(ToolDefinition::Function {
+                name: tool.clone(),
+                description: if description.is_empty() {
+                    format!("Hand the conversation over to {agent}.")
+                } else {
+                    format!("Hand the conversation over to {agent}: {description}")
+                },
+                parameters: json!({"type": "object", "properties": {}, "additionalProperties": false}),
+                defer_loading: false,
+            });
+        }
         if self.offers_own_search(caps) {
             if let Some(config) = &self.config.tool_search {
                 tools.push(ToolDefinition::Function {
@@ -1435,10 +1783,16 @@ impl State {
         tools
     }
 
+    /// Whether the policies let the runs use the tool.
+    fn permits(&self, key: &ToolKey) -> bool {
+        self.config.tool_policy.permits(key)
+            && self.restrictions.iter().all(|policy| policy.permits(key))
+    }
+
     /// Whether the model can take the tool: namespaced and custom tools only when it takes
     /// them.
     fn fits(&self, key: &ToolKey, caps: &ModelInfo) -> bool {
-        self.config.tool_policy.permits(key)
+        self.permits(key)
             && (caps.namespaces || key.namespace.is_none())
             && (caps.custom_tools || self.registry.kind(key) != Some(&ToolKind::Custom))
     }
@@ -1588,6 +1942,7 @@ fn error_type(error: &Error) -> &'static str {
         Error::Session(_) => "session",
         Error::Compaction(_) => "compaction",
         Error::Output(_) => "output",
+        Error::Approval(_) => "approval",
         Error::Json(_) => "json",
         _ => "other",
     }

@@ -14,18 +14,24 @@ use futures::stream::{FuturesUnordered, Stream};
 use tracing::field::Empty;
 use tracing::Instrument;
 
+use super::approval::{ApprovalDecision, ApprovalPolicy};
 use super::hooks::{CallDecision, RunHooks};
 use crate::item::{ToolCall, ToolKind, ToolOutput};
 use crate::platform::{BoxFuture, Instant};
 use crate::tools::{ToolError, ToolRegistry};
 
-type Running<'r> = BoxFuture<'r, (usize, Result<ToolOutput, ToolError>)>;
+/// A running call: its slot, and its answer (`None`: waiting for a person's approval).
+type Running<'r> = BoxFuture<'r, (usize, Result<Option<ToolOutput>, ToolError>)>;
 
 struct Slot {
     call: ToolCall,
     parallel: bool,
+    /// Whether the approval policy decides before it runs.
+    check: bool,
     started: Option<Instant>,
     answer: Option<ToolOutput>,
+    /// The policy asked a person: no answer until the run resumes.
+    pending: bool,
 }
 
 pub(super) struct Dispatcher<'r> {
@@ -39,6 +45,7 @@ pub(super) struct Dispatcher<'r> {
     span: tracing::Span,
     trace_content: bool,
     hooks: &'r dyn RunHooks,
+    approvals: Option<&'r dyn ApprovalPolicy>,
 }
 
 impl<'r> Dispatcher<'r> {
@@ -47,11 +54,13 @@ impl<'r> Dispatcher<'r> {
         span: tracing::Span,
         trace_content: bool,
         hooks: &'r dyn RunHooks,
+        approvals: Option<&'r dyn ApprovalPolicy>,
     ) -> Self {
         Self {
             span,
             trace_content,
             hooks,
+            approvals,
             registry,
             slots: Vec::new(),
             queue: VecDeque::new(),
@@ -61,13 +70,16 @@ impl<'r> Dispatcher<'r> {
         }
     }
 
-    /// Queue a call; it starts as soon as the gate lets it.
-    pub(super) fn push(&mut self, call: ToolCall, parallel: bool) {
+    /// Queue a call; it starts as soon as the gate lets it. With `check`, the approval policy
+    /// decides first.
+    pub(super) fn push(&mut self, call: ToolCall, parallel: bool, check: bool) {
         self.slots.push(Slot {
             call,
             parallel,
+            check,
             started: None,
             answer: None,
+            pending: false,
         });
         self.queue.push_back(self.slots.len() - 1);
         self.start_ready();
@@ -78,6 +90,8 @@ impl<'r> Dispatcher<'r> {
         self.slots.push(Slot {
             call,
             parallel: true,
+            check: false,
+            pending: false,
             started: Some(Instant::now()),
             answer: Some(answer),
         });
@@ -103,16 +117,32 @@ impl<'r> Dispatcher<'r> {
             let slot = &mut self.slots[index];
             slot.started = Some(Instant::now());
             let call = slot.call.clone();
+            let check = slot.check;
             let registry = self.registry;
             let hooks = self.hooks;
+            let approvals = self.approvals;
             let span = tool_span(&self.span, &call, self.trace_content);
             let trace_content = self.trace_content;
             self.running.push(Box::pin(
                 async move {
-                    let answer = answer_hooked(registry, hooks, call).await;
+                    let decision = match (check, approvals) {
+                        (true, Some(policy)) => policy.decide(&call).await,
+                        _ => ApprovalDecision::Approve,
+                    };
+                    let answer = match decision {
+                        ApprovalDecision::Ask => Ok(None),
+                        ApprovalDecision::Deny(reason) => Ok(Some(ToolOutput::failure(
+                            &call,
+                            format!("denied: {reason}"),
+                        ))),
+                        _ => answer_hooked(registry, hooks, call).await.map(Some),
+                    };
                     let current = tracing::Span::current();
                     match &answer {
-                        Ok(output) => {
+                        Ok(None) => {
+                            current.record("genai_agents.approval", "pending");
+                        }
+                        Ok(Some(output)) => {
                             if !output.success {
                                 current.record("error.type", "tool_error");
                             }
@@ -139,14 +169,8 @@ impl<'r> Dispatcher<'r> {
         self.queue.is_empty() && self.running.is_empty()
     }
 
-    /// Wait for the next call to finish and return its slot; a fatal failure is returned as the
-    /// error. Pending forever while no call runs.
-    pub(super) async fn finished(&mut self) -> Result<usize, ToolError> {
-        futures::future::poll_fn(|cx| self.poll_finished(cx)).await
-    }
-
-    /// Poll for the next call to finish ([`finished`](Self::finished)): pending while no call
-    /// runs.
+    /// Poll for the next call to finish and return its slot (a fatal failure is the error):
+    /// pending while no call runs.
     pub(super) fn poll_finished(&mut self, cx: &mut Context<'_>) -> Poll<Result<usize, ToolError>> {
         let (index, result) = match std::pin::Pin::new(&mut self.running).poll_next(cx) {
             Poll::Ready(Some(finished)) => finished,
@@ -158,17 +182,28 @@ impl<'r> Dispatcher<'r> {
     fn record(
         &mut self,
         index: usize,
-        result: Result<ToolOutput, ToolError>,
+        result: Result<Option<ToolOutput>, ToolError>,
     ) -> Result<usize, ToolError> {
         if self.slots[index].parallel {
             self.parallel_running -= 1;
         } else {
             self.exclusive_running = false;
         }
-        let answer = result?;
-        self.slots[index].answer = Some(answer);
+        match result? {
+            Some(answer) => self.slots[index].answer = Some(answer),
+            None => self.slots[index].pending = true,
+        }
         self.start_ready();
         Ok(index)
+    }
+
+    /// The calls waiting for a person's approval, in call order.
+    pub(super) fn pending(&self) -> Vec<ToolCall> {
+        self.slots
+            .iter()
+            .filter(|slot| slot.pending)
+            .map(|slot| slot.call.clone())
+            .collect()
     }
 
     /// The answer of a finished slot.
@@ -191,7 +226,12 @@ impl<'r> Dispatcher<'r> {
     /// Stop every call: the answers of the finished calls, `"aborted by user after …s"` for the
     /// running ones and `"aborted"` for the others, in call order. The dispatcher is emptied.
     pub(super) fn abort(&mut self) -> Vec<ToolOutput> {
-        let started: Vec<Option<Instant>> = self.slots.iter().map(|slot| slot.started).collect();
+        // A call waiting for approval never ran: "aborted", as one that never started.
+        let started: Vec<Option<Instant>> = self
+            .slots
+            .iter()
+            .map(|slot| slot.started.filter(|_| !slot.pending))
+            .collect();
         self.take()
             .into_iter()
             .zip(started)
@@ -250,6 +290,7 @@ fn tool_span(parent: &tracing::Span, call: &ToolCall, trace_content: bool) -> tr
         gen_ai.tool.type = kind,
         gen_ai.tool.call.arguments = trace_content.then_some(call.input.as_str()),
         gen_ai.tool.call.result = Empty,
+        genai_agents.approval = Empty,
         error.type = Empty,
     )
 }

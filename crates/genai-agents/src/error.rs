@@ -41,6 +41,9 @@ pub enum Error {
     /// The answer does not match the output type the agent asked for, after its retries.
     #[error("the answer does not match the output type: {0}")]
     Output(String),
+    /// An approval decision does not fit the run it resumes.
+    #[error("approval: {0}")]
+    Approval(String),
     /// A session could not be read or written.
     #[error(transparent)]
     Session(#[from] crate::session::SessionError),
