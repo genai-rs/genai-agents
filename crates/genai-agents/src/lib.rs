@@ -22,6 +22,8 @@
 //!   and guarded writes ([`Runner::run_session`]).
 //! - [`record`]: a model that records its requests and responses, and one that replays them, for
 //!   tests and evals without a network.
+//! - [`fallback`]: a model of routes, falling back to other credentials and other models when
+//!   one is refused, gone or failing.
 //!
 //! ```rust
 //! use genai_agents::tools::{FunctionTool, ToolRegistry};
@@ -104,6 +106,7 @@
 pub mod agent;
 mod conversation;
 mod error;
+pub mod fallback;
 mod item;
 mod model;
 mod platform;
