@@ -24,6 +24,8 @@
 //!   tests and evals without a network.
 //! - [`fallback`]: a model of routes, falling back to other credentials and other models when
 //!   one is refused, gone or failing.
+//! - [`skills`]: skills in the Agent Skills format (`SKILL.md`), listed for the model and loaded
+//!   with a tool, and instruction files (`AGENTS.md`).
 //!
 //! ```rust
 //! use genai_agents::tools::{FunctionTool, ToolRegistry};
@@ -113,6 +115,7 @@ mod platform;
 pub mod record;
 pub mod runner;
 pub mod session;
+pub mod skills;
 #[cfg(feature = "testing")]
 #[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub mod testing;
@@ -171,6 +174,11 @@ pub struct ContextGuide;
 #[cfg(doctest)]
 #[doc = include_str!("../../../docs/recording.md")]
 pub struct RecordingGuide;
+
+/// The examples of the skills guide (`docs/skills.md`), compiled as doc tests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/skills.md")]
+pub struct SkillsGuide;
 
 /// The examples of the tools guide (`docs/tools.md`), compiled and run as doc tests.
 #[cfg(doctest)]
