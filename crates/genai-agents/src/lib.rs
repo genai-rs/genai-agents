@@ -135,6 +135,20 @@ pub use runner::{
 };
 pub use tools::ToolRegistry;
 
+#[cfg(feature = "macros")]
+#[cfg_attr(docsrs, doc(cfg(feature = "macros")))]
+pub use genai_agents_macros::tool;
+
+/// What the code of `#[tool]` refers to, so that a crate using it needs no dependency on serde
+/// or schemars of its own. Not part of the API.
+#[cfg(feature = "macros")]
+#[doc(hidden)]
+pub mod __private {
+    pub use schemars;
+    pub use serde;
+    pub use serde_json;
+}
+
 /// The examples of the sessions guide (`docs/sessions.md`), compiled and run as doc tests.
 #[cfg(doctest)]
 #[doc = include_str!("../../../docs/sessions.md")]
