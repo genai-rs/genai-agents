@@ -1,6 +1,6 @@
 # Design
 
-Status: slices 1 to 6 are implemented; the rest is proposed. The guides describe what is implemented.
+Status: implemented, slices 1 to 9. The guides describe each part as it is; where the implementation differs from a slice below, its pull request says so.
 
 genai-agents runs agents: a model, instructions and tools, called in a loop until the model answers. It takes the
 feature list of OpenAI's [Agents SDK](https://openai.github.io/openai-agents-python) (Python and TypeScript; there

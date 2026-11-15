@@ -954,3 +954,21 @@ async fn custom_prompt_cache_keys_and_none() {
     assert_eq!(seen[0].prompt_cache_key.as_deref(), Some("k"));
     assert_eq!(seen[1].prompt_cache_key, None);
 }
+
+#[tokio::test]
+async fn the_tools_change_between_runs() {
+    let model = ScriptedModel::new(|_, _| reply("resp", vec![message("ok")]));
+    let shared = Arc::new(weather_tools());
+    let mut runner = Runner::new(model.clone(), Arc::clone(&shared));
+    runner.run(&mut Conversation::user("hi")).await.unwrap();
+
+    // The registry is shared with the application: the runner changes its own copy.
+    assert!(runner.registry_mut().remove(&ToolKey::new("get_weather")));
+    runner.run(&mut Conversation::user("hi")).await.unwrap();
+    assert_eq!(shared.len(), 1);
+    assert!(runner.registry().is_empty());
+
+    let seen = model.requests();
+    assert_eq!(seen[0].tool_names(), ["get_weather"]);
+    assert!(seen[1].tool_names().is_empty());
+}

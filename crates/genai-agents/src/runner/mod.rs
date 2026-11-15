@@ -426,6 +426,13 @@ impl<M: Model> Runner<M> {
         &self.state.registry
     }
 
+    /// The tools, to change them between runs (such as when an MCP server's tool list changed).
+    /// A run started before keeps the tools it started with: when the registry is shared (with
+    /// a run's clone, or the application's), it is cloned first.
+    pub fn registry_mut(&mut self) -> &mut ToolRegistry {
+        Arc::make_mut(&mut self.state.registry)
+    }
+
     /// The prompt cache key the requests carry, if any ([`RunConfig::prompt_cache_key`]).
     #[must_use]
     pub fn prompt_cache_key(&self) -> Option<&str> {
