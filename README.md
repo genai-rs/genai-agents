@@ -9,6 +9,7 @@ that calls the model in a loop, runs the tools it asks for and sends their outpu
 | Crate | What it holds |
 | --- | --- |
 | [`genai-agents`](crates/genai-agents) | the runner, tools, the conversation and the `Model` trait, independent of the model provider |
+| [`genai-agents-eval`](crates/genai-agents-eval) | evals: datasets, scorers, pass@k and pass^k, baselines, Langfuse dataset runs |
 | [`genai-agents-macros`](crates/genai-agents-macros) | `#[tool]`: a function tool from an async function (the `macros` feature of `genai-agents`) |
 | [`genai-agents-openai`](crates/genai-agents-openai) | OpenAI's Responses API and Chat Completions as models, on [openai-ergonomic](https://github.com/genai-rs/openai-ergonomic) |
 | [`genai-agents-sqlite`](crates/genai-agents-sqlite) | sessions in SQLite |
@@ -25,15 +26,17 @@ What works today:
 - recorded runs, replayed in tests without a network;
 - context management: compaction, pruning of old tool outputs, input while a run is going, guards against loops;
 - agents: instructions, a context, hooks, input and output guardrails, structured output, a tool policy;
+- evals: scorers of the answer, the trajectory and the cost, repeated runs, baselines for CI, Langfuse dataset runs;
 - natively and on WebAssembly.
 
-Evals, approvals and handoffs, MCP and skills come next: see the [design](docs/design.md).
+Approvals and handoffs, MCP and skills come next: see the [design](docs/design.md).
 
 - [The runner](docs/runner.md)
 - [Tools](docs/tools.md)
 - [Sessions](docs/sessions.md)
 - [Agents](docs/agents.md)
 - [Context management](docs/context.md)
+- [Evals](docs/evals.md)
 - [Tracing](docs/tracing.md)
 - [Recorded runs](docs/recording.md)
 
