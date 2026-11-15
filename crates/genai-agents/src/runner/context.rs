@@ -348,7 +348,7 @@ fn is_note(message: &Message) -> bool {
 }
 
 /// An injected user message with this text.
-pub(super) fn note(text: &str) -> Item {
+pub(crate) fn note(text: &str) -> Item {
     Item::Message(Message::text(Role::User, text).with_meta(ItemMeta::new().with_injected(true)))
 }
 

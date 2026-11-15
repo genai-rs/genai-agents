@@ -23,6 +23,8 @@ pub enum CacheBreak {
     Settings,
     /// The prompt cache key changed.
     Key,
+    /// The instructions changed.
+    Instructions,
     /// The history no longer starts with what the request before sent (a compaction, an edit,
     /// reasoning of another model left out).
     History,
@@ -37,6 +39,7 @@ impl CacheBreak {
             Self::Tools => "tools",
             Self::Settings => "settings",
             Self::Key => "key",
+            Self::Instructions => "instructions",
             Self::History => "history",
         }
     }
@@ -47,6 +50,7 @@ impl CacheBreak {
 pub(super) struct RequestShape {
     model: u64,
     tools: u64,
+    instructions: u64,
     settings: ModelSettings,
     key: Option<String>,
     items: Vec<u64>,
@@ -56,6 +60,7 @@ impl RequestShape {
     pub(super) fn new(
         model: &str,
         tools: &[ToolDefinition],
+        instructions: Option<&str>,
         settings: ModelSettings,
         key: Option<&str>,
         items: &[Item],
@@ -63,6 +68,7 @@ impl RequestShape {
         Self {
             model: fnv1a(model.as_bytes()),
             tools: hash(tools),
+            instructions: hash(&instructions),
             settings,
             key: key.map(str::to_owned),
             items: items.iter().map(hash).collect(),
@@ -75,6 +81,8 @@ impl RequestShape {
             Some(CacheBreak::Model)
         } else if self.key != previous.key {
             Some(CacheBreak::Key)
+        } else if self.instructions != previous.instructions {
+            Some(CacheBreak::Instructions)
         } else if self.tools != previous.tools {
             Some(CacheBreak::Tools)
         } else if self.settings != previous.settings {

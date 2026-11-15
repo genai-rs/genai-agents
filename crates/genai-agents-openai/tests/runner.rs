@@ -20,9 +20,9 @@ use futures::StreamExt;
 use genai_agents::tools::{Exposure, FunctionTool, ToolKey, ToolRegistry};
 use genai_agents::{
     CancellationSignal, ContextConfig, Conversation, Error, Item, ItemMeta, Message, Model,
-    ModelEvent, ModelInfo, ModelSettings, Origin, PromptCacheKey, Reasoning, ReasoningLevel,
-    Result, RetryConfig, Role, RunConfig, RunEvent, RunStop, Runner, StopReason, ToolCall,
-    ToolOutput, ToolOutputBody, Usage, CUT_OFF_OUTPUT,
+    ModelEvent, ModelInfo, ModelSettings, Origin, OutputSchema, PromptCacheKey, Reasoning,
+    ReasoningLevel, Result, RetryConfig, Role, RunConfig, RunEvent, RunStop, Runner, StopReason,
+    ToolCall, ToolOutput, ToolOutputBody, Usage, CUT_OFF_OUTPUT,
 };
 use genai_agents_openai::{Compat, OpenAiChat, OpenAiResponses, PROVIDER, RESPONSES_API};
 use openai_ergonomic::{ChatCompletionBuilder, Client, Config, ResponsesBuilder};
@@ -1350,4 +1350,67 @@ async fn calls_of_a_completion_cut_off_at_the_output_limit_are_not_run() {
         .unwrap();
     assert!(!answer.success);
     assert_eq!(answer.body, ToolOutputBody::text(CUT_OFF_OUTPUT));
+}
+
+#[tokio::test]
+async fn instructions_and_structured_output_reach_both_apis() {
+    let schema = OutputSchema::new(
+        "answer",
+        json!({"type": "object", "properties": {"umbrella": {"type": "boolean"}}}),
+    )
+    .with_strict(true);
+    let config = RunConfig::new()
+        .with_instructions("You are a household assistant.")
+        .with_output(schema.clone());
+
+    // Responses: `instructions` replaces the template's, `text.format` carries the schema.
+    let (client, seen) = scripted(|_, _| Reply::sse(&events("resp_1", &[message("{}")])));
+    let mut runner = Runner::new(
+        OpenAiResponses::new(client, template()),
+        ToolRegistry::new(),
+    )
+    .with_config(config.clone());
+    runner
+        .run(&mut Conversation::user("Umbrella?"))
+        .await
+        .unwrap();
+    let body = seen.lock().unwrap()[0].clone();
+    assert_eq!(body["instructions"], "You are a household assistant.");
+    assert_eq!(
+        body["text"]["format"],
+        json!({"type": "json_schema", "name": "answer", "schema": schema.schema, "strict": true})
+    );
+
+    // Chat Completions: a first developer (or system) message instead of the template's.
+    let (client, seen) = scripted(|_, _| Reply::json(&chat_completion(Some("{}"), &[])));
+    let template = ChatCompletionBuilder::new("gpt-4.1-mini").system("Be brief.");
+    let mut runner = Runner::new(
+        OpenAiChat::new(client.clone(), template.clone()),
+        ToolRegistry::new(),
+    )
+    .with_config(config.clone());
+    runner
+        .run(&mut Conversation::user("Umbrella?"))
+        .await
+        .unwrap();
+    let body = seen.lock().unwrap()[0].clone();
+    assert_eq!(
+        body["messages"][0],
+        json!({"role": "developer", "content": "You are a household assistant."})
+    );
+    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(body["response_format"]["type"], "json_schema");
+    assert_eq!(body["response_format"]["json_schema"]["name"], "answer");
+    assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+
+    // A server without the developer role gets a system message.
+    let (client, seen) = scripted(|_, _| Reply::json(&chat_completion(Some("{}"), &[])));
+    let model = OpenAiChat::new(client, template).with_compat(Compat::cautious());
+    let mut runner = Runner::new(model, ToolRegistry::new()).with_config(config);
+    runner
+        .run(&mut Conversation::user("Umbrella?"))
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap()[0]["messages"][0]["role"], "system");
 }

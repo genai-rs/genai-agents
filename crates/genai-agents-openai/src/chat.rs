@@ -126,6 +126,21 @@ impl<T> OpenAiChat<T> {
             _ => Vec::new(),
         };
         messages.pop();
+        if let Some(instructions) = request.instructions {
+            // The template's own instructions give way to the request's.
+            messages.retain(|message| {
+                !matches!(message["role"].as_str(), Some("system" | "developer"))
+            });
+            let role = if self.compat.supports_developer_role {
+                "developer"
+            } else {
+                "system"
+            };
+            messages.insert(
+                0,
+                serde_json::json!({"role": role, "content": instructions}),
+            );
+        }
         messages.extend(convert::chat_messages(request.items, &self.compat));
         map.insert("messages".into(), Value::Array(messages));
         let mut tools = match map.get_mut("tools").map(Value::take) {
@@ -144,6 +159,19 @@ impl<T> OpenAiChat<T> {
         }
         if let Some(key) = request.prompt_cache_key {
             map.insert("prompt_cache_key".into(), Value::String(key.to_string()));
+        }
+        if let Some(output) = request.output {
+            map.insert(
+                "response_format".into(),
+                serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": output.name,
+                        "schema": output.schema,
+                        "strict": output.strict,
+                    },
+                }),
+            );
         }
         if let Some(level) = request.settings.reasoning {
             if self.compat.supports_reasoning_effort {

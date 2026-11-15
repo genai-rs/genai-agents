@@ -13,6 +13,9 @@
 //! - [`Runner`]: the loop, with concurrent tool calls started while the response streams,
 //!   cancellation, retries, iteration limits and tool search; traced with OpenTelemetry's GenAI
 //!   conventions (`invoke_agent`, `chat` and `execute_tool` spans).
+//! - [`agent`]: an [`Agent`](agent::Agent) is a runner with a name, instructions, a context,
+//!   [hooks](Hooks), guardrails, a [tool policy](ToolPolicy) and an output type (structured
+//!   output).
 //! - Context management ([`ContextConfig`]): compaction into a summary, pruning of old tool
 //!   outputs, input while a run is going ([`RunInput`]), and guards against a model that loops.
 //! - [`session`]: conversations kept between runs as an append-only log, with rollback, forks
@@ -90,6 +93,7 @@
 //!
 //! The guides go further: [the runner](https://github.com/genai-rs/genai-agents/blob/main/docs/runner.md),
 //! [tools](https://github.com/genai-rs/genai-agents/blob/main/docs/tools.md),
+//! [agents](https://github.com/genai-rs/genai-agents/blob/main/docs/agents.md),
 //! [context management](https://github.com/genai-rs/genai-agents/blob/main/docs/context.md),
 //! [sessions](https://github.com/genai-rs/genai-agents/blob/main/docs/sessions.md),
 //! [tracing](https://github.com/genai-rs/genai-agents/blob/main/docs/tracing.md) and
@@ -97,6 +101,7 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod agent;
 mod conversation;
 mod error;
 mod item;
@@ -109,6 +114,7 @@ pub mod session;
 #[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub mod testing;
 pub mod tools;
+pub mod untrusted;
 
 pub use conversation::{Conversation, NormalizeReport, ProjectionReport, IMAGE_OMITTED};
 pub use error::{BoxError, Error, ErrorKind, ModelError, Result, RetryClass};
@@ -118,14 +124,14 @@ pub use item::{
 };
 pub use model::{
     CallIds, Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelSettings, ModelStream,
-    RateLimitWindow, RateLimits, ReasoningLevel, StopReason, ToolDefinition, Usage,
+    OutputSchema, RateLimitWindow, RateLimits, ReasoningLevel, StopReason, ToolDefinition, Usage,
 };
 pub use platform::{BoxFuture, BoxStream, MaybeSend, MaybeSync};
 pub use runner::{
-    estimate_tokens, CacheBreak, CancellationSignal, ContextConfig, PromptCacheKey, PruneConfig,
-    RetryConfig, RunConfig, RunEvent, RunInput, RunOutcome, RunStop, Runner, ToolSearchConfig,
-    TurnRecord, COMPACTION_PROMPT, CUT_OFF_OUTPUT, INTERRUPTED_NOTE, PRUNED_OUTPUT,
-    REPEATED_FAILURE, TEXT_CALL_NOTE, TOOL_SEARCH,
+    estimate_tokens, CacheBreak, CallDecision, CancellationSignal, ContextConfig, Hooks,
+    PromptCacheKey, PruneConfig, RequestPlan, RetryConfig, RunConfig, RunEvent, RunInput,
+    RunOutcome, RunStop, Runner, ToolPolicy, ToolSearchConfig, TurnRecord, COMPACTION_PROMPT,
+    CUT_OFF_OUTPUT, INTERRUPTED_NOTE, PRUNED_OUTPUT, REPEATED_FAILURE, TEXT_CALL_NOTE, TOOL_SEARCH,
 };
 pub use tools::ToolRegistry;
 
@@ -133,6 +139,11 @@ pub use tools::ToolRegistry;
 #[cfg(doctest)]
 #[doc = include_str!("../../../docs/sessions.md")]
 pub struct SessionsGuide;
+
+/// The examples of the agents guide (`docs/agents.md`), compiled and run as doc tests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/agents.md")]
+pub struct AgentsGuide;
 
 /// The examples of the context guide (`docs/context.md`), compiled and run as doc tests.
 #[cfg(doctest)]

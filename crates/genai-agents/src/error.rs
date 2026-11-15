@@ -38,6 +38,9 @@ pub enum Error {
     /// A compaction did not give a usable summary: it was empty, or cut off at the output limit.
     #[error("compaction failed: {0}")]
     Compaction(String),
+    /// The answer does not match the output type the agent asked for, after its retries.
+    #[error("the answer does not match the output type: {0}")]
+    Output(String),
     /// A session could not be read or written.
     #[error(transparent)]
     Session(#[from] crate::session::SessionError),

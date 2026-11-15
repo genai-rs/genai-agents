@@ -23,13 +23,15 @@ What works today:
 - tracing with OpenTelemetry's GenAI conventions, to Langfuse or any OpenTelemetry backend;
 - recorded runs, replayed in tests without a network;
 - context management: compaction, pruning of old tool outputs, input while a run is going, guards against loops;
+- agents: instructions, a context, hooks, input and output guardrails, structured output, a tool policy;
 - natively and on WebAssembly.
 
-Agents with guardrails and handoffs, evals, MCP and skills come next: see the [design](docs/design.md).
+Evals, approvals and handoffs, MCP and skills come next: see the [design](docs/design.md).
 
 - [The runner](docs/runner.md)
 - [Tools](docs/tools.md)
 - [Sessions](docs/sessions.md)
+- [Agents](docs/agents.md)
 - [Context management](docs/context.md)
 - [Tracing](docs/tracing.md)
 - [Recorded runs](docs/recording.md)

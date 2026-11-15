@@ -48,8 +48,8 @@ use serde_json::Value;
 use crate::error::{ErrorKind, ModelError, RetryClass};
 use crate::item::Item;
 use crate::model::{
-    Model, ModelEvent, ModelInfo, ModelRequest, ModelSettings, ModelStream, RateLimits,
-    ToolDefinition,
+    Model, ModelEvent, ModelInfo, ModelRequest, ModelSettings, ModelStream, OutputSchema,
+    RateLimits, ToolDefinition,
 };
 use crate::platform::MaybeSend;
 
@@ -67,6 +67,12 @@ pub struct RecordedRequest {
     pub settings: ModelSettings,
     /// Whether the model could call several tools at once.
     pub parallel_tool_calls: bool,
+    /// The instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// The schema of the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<OutputSchema>,
 }
 
 impl RecordedRequest {
@@ -78,6 +84,8 @@ impl RecordedRequest {
             tools: request.tools.to_vec(),
             settings: request.settings,
             parallel_tool_calls: request.parallel_tool_calls,
+            instructions: request.instructions.map(str::to_owned),
+            output: request.output.cloned(),
         }
     }
 }

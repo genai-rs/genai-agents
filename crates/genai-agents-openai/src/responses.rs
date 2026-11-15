@@ -195,6 +195,26 @@ impl<T> OpenAiResponses<T> {
             );
         }
         map.insert("store".into(), Value::Bool(self.store));
+        if let Some(instructions) = request.instructions {
+            map.insert(
+                "instructions".into(),
+                Value::String(instructions.to_owned()),
+            );
+        }
+        if let Some(output) = request.output {
+            let text = map
+                .entry("text")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !text.is_object() {
+                *text = Value::Object(serde_json::Map::new());
+            }
+            text["format"] = serde_json::json!({
+                "type": "json_schema",
+                "name": output.name,
+                "schema": output.schema,
+                "strict": output.strict,
+            });
+        }
         if let Some(key) = request.prompt_cache_key {
             map.insert("prompt_cache_key".into(), Value::String(key.to_string()));
         }
