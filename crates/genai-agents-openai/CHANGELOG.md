@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/genai-rs/genai-agents/compare/genai-agents-openai-v0.2.0...genai-agents-openai-v0.3.0) - 2026-11-15
+
+### Added
+
+- agents with instructions, context, hooks, guardrails and structured output
+- [**breaking**] context management: compaction, pruning, input during a run, guards
+- sessions, tracing spans and recorded runs
+
+### Other
+
+- release
+
 ## [0.2.0](https://github.com/genai-rs/genai-agents/compare/genai-agents-openai-v0.1.0...genai-agents-openai-v0.2.0) - 2026-11-14
 
 ### Added
