@@ -4,6 +4,7 @@ members = [
     "crates/genai-agents",
     "crates/genai-agents-eval",
     "crates/genai-agents-macros",
+    "crates/genai-agents-mcp",
     "crates/genai-agents-openai",
     "crates/genai-agents-sqlite",
 ]

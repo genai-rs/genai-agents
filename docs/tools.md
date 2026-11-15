@@ -172,10 +172,15 @@ can set it on any answer (`ToolOutput::with_details`).
   Lark grammar or a regular expression. Only models that take custom tools see them.
 - `DynamicTool::new(name, description, schema, handler)` is a tool known at run time, such as one of an MCP server.
   `register_dynamic` adapts it instead of rejecting it: the name is cleaned up and made unique (`raw_name` gives
-  the original back), the schema is rewritten into one models accept and compacted when it is large.
+  the original back), the schema is rewritten into one models accept and compacted when it is large. The tools
+  of an MCP server are registered this way ([MCP](mcp.md)).
 
-`ToolRegistry::namespace(name, description)` groups tools; the model calls them with the namespace on the call.
-Only models that take namespaces see them.
+`ToolRegistry::namespace(name, description)` groups tools (`register_dynamic` on it too); the model calls them with
+the namespace on the call. Only models that take namespaces see them.
+
+`remove` and `remove_namespace` take tools out again. A clone of a registry shares the tools' handlers but not the
+list: a run that holds a clone keeps its tools while the original changes (`Runner::registry_mut` changes a runner's
+tools between runs).
 
 ## When the model sees a tool
 

@@ -11,6 +11,7 @@ that calls the model in a loop, runs the tools it asks for and sends their outpu
 | [`genai-agents`](crates/genai-agents) | the runner, tools, the conversation and the `Model` trait, independent of the model provider |
 | [`genai-agents-eval`](crates/genai-agents-eval) | evals: datasets, scorers, pass@k and pass^k, baselines, Langfuse dataset runs |
 | [`genai-agents-macros`](crates/genai-agents-macros) | `#[tool]`: a function tool from an async function (the `macros` feature of `genai-agents`) |
+| [`genai-agents-mcp`](crates/genai-agents-mcp) | the tools of MCP servers (stdio or streamable HTTP), on [rmcp](https://docs.rs/rmcp) |
 | [`genai-agents-openai`](crates/genai-agents-openai) | OpenAI's Responses API and Chat Completions as models, on [openai-ergonomic](https://github.com/genai-rs/openai-ergonomic) |
 | [`genai-agents-sqlite`](crates/genai-agents-sqlite) | sessions in SQLite |
 
@@ -27,19 +28,25 @@ What works today:
 - context management: compaction, pruning of old tool outputs, input while a run is going, guards against loops;
 - agents: instructions, a context, hooks, input and output guardrails, structured output, a tool policy;
 - approvals that stop a run and resume it, handoffs, agents as tools, sub-agents in the background;
+- the tools of MCP servers, in a namespace per server, found by a tool search;
+- skills (`SKILL.md`) and instruction files (`AGENTS.md`);
+- fallback models and credentials;
 - evals: scorers of the answer, the trajectory and the cost, repeated runs, baselines for CI, Langfuse dataset runs;
-- natively and on WebAssembly.
+- natively and on WebAssembly (MCP natively only).
 
-MCP, skills and fallback models come next: see the [design](docs/design.md).
+The [design](docs/design.md) describes the whole and where it comes from.
 
 - [The runner](docs/runner.md)
 - [Tools](docs/tools.md)
+- [MCP](docs/mcp.md)
 - [Sessions](docs/sessions.md)
 - [Agents](docs/agents.md)
 - [Context management](docs/context.md)
 - [Evals](docs/evals.md)
 - [Tracing](docs/tracing.md)
 - [Recorded runs](docs/recording.md)
+- [Skills and instruction files](docs/skills.md)
+- [Fallback models and credentials](docs/fallback.md)
 
 ## License
 

@@ -47,6 +47,7 @@
 
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::future::Future;
+use std::sync::Arc;
 
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
@@ -749,6 +750,7 @@ impl ErasedTool for DynamicAdapter {
     }
 }
 
+#[derive(Clone)]
 struct RegisteredTool {
     kind: ToolKind,
     description: String,
@@ -756,7 +758,7 @@ struct RegisteredTool {
     parameters: Value,
     /// The input format of a custom tool.
     format: CustomFormat,
-    handler: Box<dyn ErasedTool>,
+    handler: Arc<dyn ErasedTool>,
     supports_parallel: bool,
     output_budget: Option<OutputBudget>,
     exposure: Exposure,
@@ -770,7 +772,7 @@ impl RegisteredTool {
     fn function(
         description: &str,
         parameters: Value,
-        handler: Box<dyn ErasedTool>,
+        handler: Arc<dyn ErasedTool>,
         supports_parallel: bool,
         output_budget: Option<OutputBudget>,
         exposure: Exposure,
@@ -849,7 +851,11 @@ fn invalid(name: &str, reason: &str) -> ToolError {
 
 /// Heterogeneous tools, with definitions snapshotted at registration and returned
 /// in name order. Execution is explicit.
-#[derive(Default)]
+///
+/// A clone shares the tools' handlers with the original: changing one registry (registering,
+/// [removing](Self::remove)) leaves the other as it was, so a run that holds a clone keeps the
+/// tools it started with.
+#[derive(Default, Clone)]
 pub struct ToolRegistry {
     tools: BTreeMap<ToolKey, RegisteredTool>,
     /// Namespace names and descriptions.
@@ -918,6 +924,29 @@ impl ToolRegistry {
         &mut self,
         tool: DynamicTool,
     ) -> std::result::Result<String, ToolError> {
+        self.register_dynamic_in(None, tool)
+    }
+
+    /// Remove a registered tool; returns whether it was registered. Its namespace stays, even
+    /// when it is left without tools (it is then not advertised).
+    pub fn remove(&mut self, key: &ToolKey) -> bool {
+        self.tools.remove(key).is_some()
+    }
+
+    /// Remove a namespace and all its tools; returns whether it was registered.
+    pub fn remove_namespace(&mut self, name: &str) -> bool {
+        self.tools
+            .retain(|key, _| key.namespace.as_deref() != Some(name));
+        self.namespaces.remove(name).is_some()
+    }
+
+    // On WebAssembly handlers are not `Send`: the registry stays on one thread there.
+    #[cfg_attr(target_family = "wasm", allow(clippy::arc_with_non_send_sync))]
+    fn register_dynamic_in(
+        &mut self,
+        namespace: Option<&str>,
+        tool: DynamicTool,
+    ) -> std::result::Result<String, ToolError> {
         let mut schema = tool.schema;
         schema::sanitize(&mut schema);
         if schema.get("type").and_then(Value::as_str) != Some("object") {
@@ -936,9 +965,14 @@ impl ToolRegistry {
             tool.prefix.as_deref(),
             &tool.raw_name,
             TOOL_NAME_MAX,
-            |candidate| {
-                self.tools.contains_key(&ToolKey::new(candidate))
-                    || self.namespaces.contains_key(candidate)
+            |candidate| match namespace {
+                Some(namespace) => self
+                    .tools
+                    .contains_key(&ToolKey::namespaced(namespace, candidate)),
+                None => {
+                    self.tools.contains_key(&ToolKey::new(candidate))
+                        || self.namespaces.contains_key(candidate)
+                }
             },
         );
         let description = if tool.description.trim().is_empty() {
@@ -949,14 +983,14 @@ impl ToolRegistry {
         let mut registered = RegisteredTool::function(
             &description,
             schema,
-            Box::new(DynamicAdapter(tool.handler)),
+            Arc::new(DynamicAdapter(tool.handler)),
             tool.supports_parallel,
             tool.output_budget,
             tool.exposure,
         );
         registered.raw_name = Some(tool.raw_name);
         registered.untrusted = tool.untrusted;
-        self.insert(ToolKey::new(name.clone()), registered)?;
+        self.insert(key(namespace, name.clone()), registered)?;
         Ok(name)
     }
 
@@ -1015,7 +1049,7 @@ impl ToolRegistry {
         let mut registered = RegisteredTool::function(
             &description,
             schema,
-            Box::new(FunctionAdapter(tool)),
+            Arc::new(FunctionAdapter(tool)),
             parallel,
             budget,
             exposure,
@@ -1044,7 +1078,7 @@ impl ToolRegistry {
         let mut registered = RegisteredTool::function(
             &description,
             schema,
-            Box::new(RichAdapter(tool)),
+            Arc::new(RichAdapter(tool)),
             parallel,
             budget,
             exposure,
@@ -1071,7 +1105,7 @@ impl ToolRegistry {
             exposure: tool.exposure(),
             raw_name: None,
             untrusted: tool.untrusted_output(),
-            handler: Box::new(CustomAdapter(tool)),
+            handler: Arc::new(CustomAdapter(tool)),
         };
         self.insert(key(namespace, name), registered)
     }
@@ -1384,6 +1418,16 @@ impl NamespaceRegistrar<'_> {
         self.registry
             .register_custom_in(Some(&self.namespace), tool)?;
         Ok(self)
+    }
+
+    /// Register a [`DynamicTool`] in the namespace ([`ToolRegistry::register_dynamic`]), and
+    /// return the name the model sees, unique within the namespace.
+    pub fn register_dynamic(
+        &mut self,
+        tool: DynamicTool,
+    ) -> std::result::Result<String, ToolError> {
+        self.registry
+            .register_dynamic_in(Some(&self.namespace), tool)
     }
 }
 

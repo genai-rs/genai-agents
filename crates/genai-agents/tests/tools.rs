@@ -856,6 +856,64 @@ async fn dynamic_tools_are_sanitized() {
     ));
 }
 
+fn echo(name: &str) -> DynamicTool {
+    let reply = name.to_string();
+    DynamicTool::new(name, "Echo", json!({"type": "object"}), move |_| {
+        let reply = reply.clone();
+        async move { Ok(ToolOutputBody::text(reply)) }
+    })
+}
+
+#[tokio::test]
+async fn dynamic_tools_in_a_namespace_are_unique_within_it() {
+    let mut tools = ToolRegistry::new();
+    tools.register_dynamic(echo("lookup")).unwrap();
+    let mut docs = tools.namespace("docs", "Documentation").unwrap();
+    // The top-level `lookup` does not take the name inside the namespace.
+    assert_eq!(docs.register_dynamic(echo("lookup")).unwrap(), "lookup");
+    assert_eq!(docs.register_dynamic(echo("look.up")).unwrap(), "look_up");
+    let again = docs.register_dynamic(echo("look-up")).unwrap();
+    assert!(again.starts_with("look_up_"), "{again}");
+
+    let answer = tools
+        .answer_call(ToolCall::function("c1", "lookup", "{}").in_namespace("docs"))
+        .await
+        .unwrap();
+    assert_eq!(answer.body.as_text(), Some("lookup"));
+    assert!(tools
+        .exposure(&ToolKey::namespaced("docs", &again))
+        .is_some());
+}
+
+#[tokio::test]
+async fn removed_tools_stay_in_a_clone() {
+    let mut tools = ToolRegistry::new();
+    tools.register_dynamic(echo("solo")).unwrap();
+    tools
+        .namespace("docs", "Documentation")
+        .unwrap()
+        .register_dynamic(echo("lookup"))
+        .unwrap();
+    let before = tools.clone();
+
+    assert!(tools.remove(&ToolKey::new("solo")));
+    assert!(!tools.remove(&ToolKey::new("solo")));
+    assert!(tools.remove_namespace("docs"));
+    assert!(!tools.remove_namespace("docs"));
+    assert!(tools.is_empty());
+    assert!(tools.definitions().is_empty());
+    // The namespace's name is free again, also for a tool.
+    tools.register_dynamic(echo("docs")).unwrap();
+
+    assert_eq!(before.len(), 2);
+    let answer = before
+        .answer_call(ToolCall::function("c1", "lookup", "{}").in_namespace("docs"))
+        .await
+        .unwrap();
+    assert!(answer.success);
+    assert_eq!(answer.body.as_text(), Some("lookup"));
+}
+
 #[test]
 fn truncation_uses_the_tool_budget() {
     let call = ToolCall::function("c", "get_weather", "{}");
