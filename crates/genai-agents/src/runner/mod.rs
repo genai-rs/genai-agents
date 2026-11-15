@@ -29,6 +29,8 @@ mod cancel;
 mod config;
 mod context;
 mod dispatch;
+mod hooks;
+mod policy;
 mod trace;
 
 use std::collections::BTreeSet;
@@ -43,10 +45,14 @@ use tracing::Instrument;
 
 pub use cancel::CancellationSignal;
 pub use config::{PromptCacheKey, RetryConfig, RunConfig, ToolSearchConfig};
+pub(crate) use context::note as note_item;
 pub use context::{
     estimate_tokens, ContextConfig, PruneConfig, RunInput, COMPACTION_PROMPT, INTERRUPTED_NOTE,
     PRUNED_OUTPUT, REPEATED_FAILURE, TEXT_CALL_NOTE,
 };
+pub(crate) use hooks::{Bound, NoHooks, RunHooks};
+pub use hooks::{CallDecision, Hooks, RequestPlan};
+pub use policy::ToolPolicy;
 pub use trace::CacheBreak;
 
 use crate::conversation::Conversation;
@@ -189,6 +195,13 @@ pub enum RunStop {
         /// Why it stopped.
         reason: Option<String>,
     },
+    /// A guardrail tripped ([`Agent`](crate::agent::Agent)).
+    Guardrail {
+        /// The guardrail's name.
+        name: String,
+        /// Why it tripped.
+        reason: String,
+    },
 }
 
 /// The result of a run. The history is in the [`Conversation`] it ran on.
@@ -202,7 +215,7 @@ pub struct RunOutcome {
 }
 
 impl RunOutcome {
-    fn new(stop: RunStop, turns: Vec<TurnRecord>) -> Self {
+    pub(crate) fn new(stop: RunStop, turns: Vec<TurnRecord>) -> Self {
         Self { stop, turns }
     }
 
@@ -337,6 +350,11 @@ impl<M: Model> Runner<M> {
         &mut self.model
     }
 
+    /// The model, taken out of the runner.
+    pub fn into_model(self) -> M {
+        self.model
+    }
+
     /// The tools.
     #[must_use]
     pub fn registry(&self) -> &ToolRegistry {
@@ -388,7 +406,8 @@ impl<M: Model> Runner<M> {
         conversation: &mut Conversation,
         cancel: &CancellationSignal,
     ) -> Result<bool> {
-        self.compact_with(conversation, cancel, &mut |_| {}).await
+        self.compact_with(conversation, cancel, &mut |_| {}, &NoHooks)
+            .await
     }
 
     /// Load a [deferred](Exposure::Deferred) tool: advertise it from the next request on, as if a
@@ -431,7 +450,7 @@ impl<M: Model> Runner<M> {
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
         let span = self.run_span(None);
-        self.run_inner(conversation, cancel, on_event, &mut NoSink, &span)
+        self.run_inner(conversation, cancel, on_event, &mut NoSink, &span, &NoHooks)
             .instrument(span.clone())
             .await
     }
@@ -467,13 +486,20 @@ impl<M: Model> Runner<M> {
             synced: conversation.len(),
             session,
         };
-        self.run_inner(&mut conversation, cancel, on_event, &mut sink, &span)
-            .instrument(span.clone())
-            .await
+        self.run_inner(
+            &mut conversation,
+            cancel,
+            on_event,
+            &mut sink,
+            &span,
+            &NoHooks,
+        )
+        .instrument(span.clone())
+        .await
     }
 
     /// The `invoke_agent` span of a run.
-    fn run_span(&self, conversation: Option<&str>) -> tracing::Span {
+    pub(crate) fn run_span(&self, conversation: Option<&str>) -> tracing::Span {
         let info = self.model.info();
         let name = self.state.config.name.as_deref().unwrap_or_default();
         let origin = info.origin.as_ref();
@@ -494,17 +520,18 @@ impl<M: Model> Runner<M> {
     }
 
     /// The settings the session records for this run's requests.
-    fn turn_settings(&self) -> TurnSettings {
+    pub(crate) fn turn_settings(&self) -> TurnSettings {
         TurnSettings::new(self.model.info().origin, self.state.config.model_settings)
     }
 
-    async fn run_inner<F, K>(
+    pub(crate) async fn run_inner<F, K>(
         &mut self,
         conversation: &mut Conversation,
         cancel: &CancellationSignal,
         mut on_event: F,
         sink: &mut K,
         span: &tracing::Span,
+        hooks: &dyn RunHooks,
     ) -> Result<RunOutcome>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
@@ -533,7 +560,10 @@ impl<M: Model> Runner<M> {
                 conversation.push(item);
             }
             if self.state.over_threshold(conversation, &self.model.info()) {
-                match self.compact_with(conversation, cancel, &mut on_event).await {
+                match self
+                    .compact_with(conversation, cancel, &mut on_event, hooks)
+                    .await
+                {
                     Ok(true) => {}
                     Ok(false) => break Ok(RunOutcome::new(RunStop::Cancelled, turns)),
                     // The request may still fit; if it does not, the model says so and the
@@ -543,8 +573,12 @@ impl<M: Model> Runner<M> {
             }
             iteration += 1;
             let mut turn = TurnRecord::new(iteration);
-            let mut dispatcher =
-                Dispatcher::new(&registry, span.clone(), self.state.config.trace_content);
+            let mut dispatcher = Dispatcher::new(
+                &registry,
+                span.clone(),
+                self.state.config.trace_content,
+                hooks,
+            );
             let end = self
                 .turn(
                     conversation,
@@ -552,6 +586,7 @@ impl<M: Model> Runner<M> {
                     &mut turn,
                     cancel,
                     &mut on_event,
+                    hooks,
                 )
                 .await;
             let end = match end {
@@ -601,6 +636,12 @@ impl<M: Model> Runner<M> {
                         None if calls == 0 => {
                             let mut more = self.state.input.take_steering();
                             more.extend(self.state.input.take_follow_ups());
+                            if more.is_empty() && !hooks.is_empty() {
+                                more = match hooks.on_stop(conversation).await {
+                                    Ok(more) => more,
+                                    Err(error) => break Err(error),
+                                };
+                            }
                             if more.is_empty() {
                                 break Ok(RunOutcome::new(RunStop::Completed, turns));
                             }
@@ -653,6 +694,7 @@ impl<M: Model> Runner<M> {
         turn: &mut TurnRecord,
         cancel: &CancellationSignal,
         on_event: &mut F,
+        hooks: &dyn RunHooks,
     ) -> Result<AttemptEnd>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
@@ -665,7 +707,7 @@ impl<M: Model> Runner<M> {
                 attempt,
             });
             let end = self
-                .attempt(conversation, dispatcher, turn, cancel, on_event)
+                .attempt(conversation, dispatcher, turn, cancel, on_event, hooks)
                 .await?;
             if matches!(end, AttemptEnd::Cancelled) {
                 return Ok(end);
@@ -687,7 +729,10 @@ impl<M: Model> Runner<M> {
             {
                 compacted = true;
                 tracing::info!(error = %failure, "the context is too long: compacting");
-                if !self.compact_with(conversation, cancel, on_event).await? {
+                if !self
+                    .compact_with(conversation, cancel, on_event, hooks)
+                    .await?
+                {
                     return Ok(AttemptEnd::Cancelled);
                 }
                 continue;
@@ -785,10 +830,14 @@ impl<M: Model> Runner<M> {
         conversation: &mut Conversation,
         cancel: &CancellationSignal,
         on_event: &mut F,
+        hooks: &dyn RunHooks,
     ) -> Result<bool>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
+        if !hooks.is_empty() {
+            hooks.before_compaction(conversation).await;
+        }
         let info = self.model.info();
         let tokens_before = self.state.context_tokens(conversation);
         let model = info
@@ -865,6 +914,7 @@ impl<M: Model> Runner<M> {
             request_items.push(prompt.clone());
             let request = ModelRequest::new(&request_items)
                 .with_settings(settings)
+                .with_instructions(config.instructions.as_deref())
                 .with_prompt_cache_key(self.state.prompt_cache_key());
             let outcome = {
                 let read = read_summary(&self.model, request);
@@ -901,6 +951,7 @@ impl<M: Model> Runner<M> {
         turn: &mut TurnRecord,
         cancel: &CancellationSignal,
         on_event: &mut F,
+        hooks: &dyn RunHooks,
     ) -> Result<AttemptEnd>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
@@ -938,7 +989,7 @@ impl<M: Model> Runner<M> {
         );
         let before = conversation.len();
         let end = self
-            .attempt_inner(conversation, dispatcher, turn, cancel, on_event)
+            .attempt_inner(conversation, dispatcher, turn, cancel, on_event, hooks)
             .instrument(span.clone())
             .await;
         if let Some(id) = &turn.response_id {
@@ -989,6 +1040,7 @@ impl<M: Model> Runner<M> {
         turn: &mut TurnRecord,
         cancel: &CancellationSignal,
         on_event: &mut F,
+        hooks: &dyn RunHooks,
     ) -> Result<AttemptEnd>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
@@ -996,7 +1048,15 @@ impl<M: Model> Runner<M> {
         let model = &self.model;
         let state = &mut self.state;
         let caps = model.info();
-        let tools = state.definitions(&caps);
+        let mut plan = RequestPlan {
+            settings: state.config.model_settings,
+            tools: state.definitions(&caps),
+            instructions: state.config.instructions.clone(),
+            output: state.config.output.clone(),
+        };
+        if !hooks.is_empty() {
+            hooks.before_request(&mut plan).await?;
+        }
         let mut projection = conversation.for_request(&caps);
         let now = Instant::now();
         if let Some(prune) = &state.config.context.prune {
@@ -1015,8 +1075,9 @@ impl<M: Model> Runner<M> {
             caps.origin
                 .as_ref()
                 .map_or("", |origin| origin.model.as_str()),
-            &tools,
-            state.config.model_settings,
+            &plan.tools,
+            plan.instructions.as_deref(),
+            plan.settings,
             state.prompt_cache_key(),
             projection.items(),
         );
@@ -1042,10 +1103,12 @@ impl<M: Model> Runner<M> {
         };
         let sent = {
             let request = ModelRequest::new(projection.items())
-                .with_tools(&tools)
+                .with_tools(&plan.tools)
                 .with_parallel_tool_calls(state.config.parallel_tool_calls)
                 .with_prompt_cache_key(state.prompt_cache_key())
-                .with_settings(state.config.model_settings);
+                .with_settings(plan.settings)
+                .with_instructions(plan.instructions.as_deref())
+                .with_output(plan.output.as_ref());
             let call = model.stream(request);
             let cancelled = cancel.cancelled();
             futures::pin_mut!(call, cancelled);
@@ -1277,6 +1340,16 @@ impl State {
             dispatcher.push_answered(call, answer);
             return;
         }
+        if !self.config.tool_policy.permits(&ToolKey::of(&call)) && !self.is_own_search(&call, caps)
+        {
+            let answer = ToolOutput::failure(
+                &call,
+                format!("the tool `{}` is not allowed in this run", call.name),
+            );
+            on_event(RunEvent::ToolAnswered(&answer));
+            dispatcher.push_answered(call, answer);
+            return;
+        }
         if self.is_own_search(&call, caps) {
             let answer = self.search(&call, caps);
             on_event(RunEvent::ToolAnswered(&answer));
@@ -1365,7 +1438,8 @@ impl State {
     /// Whether the model can take the tool: namespaced and custom tools only when it takes
     /// them.
     fn fits(&self, key: &ToolKey, caps: &ModelInfo) -> bool {
-        (caps.namespaces || key.namespace.is_none())
+        self.config.tool_policy.permits(key)
+            && (caps.namespaces || key.namespace.is_none())
             && (caps.custom_tools || self.registry.kind(key) != Some(&ToolKind::Custom))
     }
 
@@ -1458,7 +1532,7 @@ fn search_schema() -> Value {
 }
 
 /// Where a run writes what it adds: nowhere ([`Runner::run_with`]) or a session.
-trait Sink: MaybeSend {
+pub(crate) trait Sink: MaybeSend {
     /// Write the items added since the last commit, the model settings when they changed, and
     /// the usage of a response.
     fn commit(
@@ -1469,7 +1543,7 @@ trait Sink: MaybeSend {
     ) -> impl Future<Output = Result<()>> + MaybeSend;
 }
 
-struct NoSink;
+pub(crate) struct NoSink;
 
 impl Sink for NoSink {
     async fn commit(&mut self, _: &Conversation, _: Option<Usage>, _: &TurnSettings) -> Result<()> {
@@ -1477,10 +1551,10 @@ impl Sink for NoSink {
     }
 }
 
-struct SessionSink<'s, S> {
-    session: &'s mut Session<S>,
+pub(crate) struct SessionSink<'s, S> {
+    pub(crate) session: &'s mut Session<S>,
     /// The items of the conversation the session has.
-    synced: usize,
+    pub(crate) synced: usize,
 }
 
 impl<S: SessionStore> Sink for SessionSink<'_, S> {
@@ -1513,6 +1587,7 @@ fn error_type(error: &Error) -> &'static str {
         Error::Tool(_) => "tool",
         Error::Session(_) => "session",
         Error::Compaction(_) => "compaction",
+        Error::Output(_) => "output",
         Error::Json(_) => "json",
         _ => "other",
     }

@@ -14,6 +14,7 @@ use futures::stream::{FuturesUnordered, Stream};
 use tracing::field::Empty;
 use tracing::Instrument;
 
+use super::hooks::{CallDecision, RunHooks};
 use crate::item::{ToolCall, ToolKind, ToolOutput};
 use crate::platform::{BoxFuture, Instant};
 use crate::tools::{ToolError, ToolRegistry};
@@ -37,6 +38,7 @@ pub(super) struct Dispatcher<'r> {
     /// The run's span: the parent of the calls' spans.
     span: tracing::Span,
     trace_content: bool,
+    hooks: &'r dyn RunHooks,
 }
 
 impl<'r> Dispatcher<'r> {
@@ -44,10 +46,12 @@ impl<'r> Dispatcher<'r> {
         registry: &'r ToolRegistry,
         span: tracing::Span,
         trace_content: bool,
+        hooks: &'r dyn RunHooks,
     ) -> Self {
         Self {
             span,
             trace_content,
+            hooks,
             registry,
             slots: Vec::new(),
             queue: VecDeque::new(),
@@ -100,11 +104,12 @@ impl<'r> Dispatcher<'r> {
             slot.started = Some(Instant::now());
             let call = slot.call.clone();
             let registry = self.registry;
+            let hooks = self.hooks;
             let span = tool_span(&self.span, &call, self.trace_content);
             let trace_content = self.trace_content;
             self.running.push(Box::pin(
                 async move {
-                    let answer = registry.answer_call(call).await;
+                    let answer = answer_hooked(registry, hooks, call).await;
                     let current = tracing::Span::current();
                     match &answer {
                         Ok(output) => {
@@ -247,4 +252,34 @@ fn tool_span(parent: &tracing::Span, call: &ToolCall, trace_content: bool) -> tr
         gen_ai.tool.call.result = Empty,
         error.type = Empty,
     )
+}
+
+/// Answer a call through the hooks: they may change its arguments or block it before it runs,
+/// and change its answer after. A hook that fails stops the run, as a fatal tool failure does.
+async fn answer_hooked(
+    registry: &ToolRegistry,
+    hooks: &dyn RunHooks,
+    mut call: ToolCall,
+) -> Result<ToolOutput, ToolError> {
+    if hooks.is_empty() {
+        return registry.answer_call(call).await;
+    }
+    let hook_failed = |call: &ToolCall, error: crate::Error| ToolError::Call {
+        call_id: call.call_id.clone(),
+        source: Box::new(ToolError::Execution {
+            name: call.name.clone(),
+            source: error,
+        }),
+    };
+    match hooks.before_call(&mut call).await {
+        Err(error) => return Err(hook_failed(&call, error)),
+        Ok(CallDecision::Block(answer)) => return Ok(ToolOutput::failure(&call, answer)),
+        Ok(CallDecision::Run) => {}
+    }
+    let mut output = registry.answer_call(call.clone()).await?;
+    hooks
+        .after_call(&call, &mut output)
+        .await
+        .map_err(|error| hook_failed(&call, error))?;
+    Ok(output)
 }

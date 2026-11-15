@@ -35,7 +35,7 @@ use crate::error::ModelError;
 use crate::item::{Item, ToolOutput};
 use crate::model::{
     Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelSettings, ModelStream,
-    RateLimitWindow, RateLimits, ToolDefinition, Usage,
+    OutputSchema, RateLimitWindow, RateLimits, ToolDefinition, Usage,
 };
 use crate::platform::{sleep, MaybeSend};
 
@@ -143,6 +143,10 @@ pub struct SeenRequest {
     pub prompt_cache_key: Option<String>,
     /// The settings.
     pub settings: ModelSettings,
+    /// The instructions.
+    pub instructions: Option<String>,
+    /// The schema of the answer.
+    pub output: Option<OutputSchema>,
 }
 
 impl SeenRequest {
@@ -259,6 +263,8 @@ impl Model for ScriptedModel {
             parallel_tool_calls: request.parallel_tool_calls,
             prompt_cache_key: request.prompt_cache_key.map(str::to_string),
             settings: request.settings,
+            instructions: request.instructions.map(str::to_owned),
+            output: request.output.cloned(),
         };
         let index = {
             let mut log = self.seen.lock().unwrap_or_else(PoisonError::into_inner);

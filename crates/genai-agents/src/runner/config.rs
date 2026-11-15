@@ -4,7 +4,8 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use super::context::ContextConfig;
-use crate::model::ModelSettings;
+use super::policy::ToolPolicy;
+use crate::model::{ModelSettings, OutputSchema};
 use crate::tools::TruncationConfig;
 
 /// The `prompt_cache_key` the runner sends with every request.
@@ -176,6 +177,13 @@ pub struct RunConfig {
     /// How the runner keeps the conversation within the model's context window: compaction,
     /// pruning, and the guards against a model that loops. Default [`ContextConfig::default`].
     pub context: ContextConfig,
+    /// The instructions (the system prompt) of every request. Default none: the provider's own,
+    /// if any.
+    pub instructions: Option<String>,
+    /// The schema the answers must match (structured output). Default none.
+    pub output: Option<OutputSchema>,
+    /// Which registered tools the runs may use. Default: all of them.
+    pub tool_policy: ToolPolicy,
 }
 
 impl Default for RunConfig {
@@ -191,6 +199,9 @@ impl Default for RunConfig {
             name: None,
             trace_content: false,
             context: ContextConfig::default(),
+            instructions: None,
+            output: None,
+            tool_policy: ToolPolicy::default(),
         }
     }
 }
@@ -255,6 +266,27 @@ impl RunConfig {
     #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// The instructions of every request.
+    #[must_use]
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
+        self
+    }
+
+    /// The schema the answers must match.
+    #[must_use]
+    pub fn with_output(mut self, output: OutputSchema) -> Self {
+        self.output = Some(output);
+        self
+    }
+
+    /// Which registered tools the runs may use.
+    #[must_use]
+    pub fn with_tool_policy(mut self, policy: ToolPolicy) -> Self {
+        self.tool_policy = policy;
         self
     }
 

@@ -100,6 +100,12 @@ pub struct ModelRequest<'a> {
     pub prompt_cache_key: Option<&'a str>,
     /// The settings of the request: the reasoning level, the output limit.
     pub settings: ModelSettings,
+    /// The instructions (the system prompt): the Responses API's `instructions`, a first
+    /// system or developer message for Chat Completions. A provider's own instructions (its
+    /// request template's) give way to them.
+    pub instructions: Option<&'a str>,
+    /// The JSON Schema the answer must match (structured output), if any.
+    pub output: Option<&'a OutputSchema>,
 }
 
 impl<'a> ModelRequest<'a> {
@@ -112,7 +118,23 @@ impl<'a> ModelRequest<'a> {
             parallel_tool_calls: true,
             prompt_cache_key: None,
             settings: ModelSettings::default(),
+            instructions: None,
+            output: None,
         }
+    }
+
+    /// The same request, with these instructions.
+    #[must_use]
+    pub fn with_instructions(mut self, instructions: Option<&'a str>) -> Self {
+        self.instructions = instructions;
+        self
+    }
+
+    /// The same request, asking for an answer that matches this schema.
+    #[must_use]
+    pub fn with_output(mut self, output: Option<&'a OutputSchema>) -> Self {
+        self.output = output;
+        self
     }
 
     /// The same request, with these settings.
@@ -141,6 +163,56 @@ impl<'a> ModelRequest<'a> {
     pub fn with_parallel_tool_calls(mut self, parallel: bool) -> Self {
         self.parallel_tool_calls = parallel;
         self
+    }
+}
+
+/// The JSON Schema an answer must match: structured output (OpenAI's `json_schema` format).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct OutputSchema {
+    /// A name for it: letters, digits, `_` and `-`.
+    pub name: String,
+    /// The schema, an object.
+    pub schema: Value,
+    /// Whether the provider must keep to it exactly (OpenAI's `strict`), which takes a schema
+    /// that lists every property as required and allows no other. Default `false`.
+    pub strict: bool,
+}
+
+impl OutputSchema {
+    /// This schema, under this name, not strict.
+    #[must_use]
+    pub fn new(name: impl Into<String>, schema: Value) -> Self {
+        Self {
+            name: name.into(),
+            schema,
+            strict: false,
+        }
+    }
+
+    /// The same schema, strict or not.
+    #[must_use]
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// The schema of `T`, named after it (feature `schemars`).
+    #[cfg(feature = "schemars")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "schemars")))]
+    #[must_use]
+    pub fn for_type<T: schemars::JsonSchema>() -> Self {
+        let name: String = T::schema_name()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        Self::new(name, crate::tools::schema::for_type::<T>())
     }
 }
 
