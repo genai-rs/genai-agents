@@ -11,7 +11,12 @@
 //!   [`ToolRegistry`], and when the model sees them
 //!   ([`Exposure`](tools::Exposure)).
 //! - [`Runner`]: the loop, with concurrent tool calls started while the response streams,
-//!   cancellation, retries, iteration limits and tool search.
+//!   cancellation, retries, iteration limits and tool search; traced with OpenTelemetry's GenAI
+//!   conventions (`invoke_agent`, `chat` and `execute_tool` spans).
+//! - [`session`]: conversations kept between runs as an append-only log, with rollback, forks
+//!   and guarded writes ([`Runner::run_session`]).
+//! - [`record`]: a model that records its requests and responses, and one that replays them, for
+//!   tests and evals without a network.
 //!
 //! ```rust
 //! use genai_agents::tools::{FunctionTool, ToolRegistry};
@@ -81,8 +86,11 @@
 //! # }
 //! ```
 //!
-//! The [runner](https://github.com/genai-rs/genai-agents/blob/main/docs/runner.md) and
-//! [tools](https://github.com/genai-rs/genai-agents/blob/main/docs/tools.md) guides go further.
+//! The guides go further: [the runner](https://github.com/genai-rs/genai-agents/blob/main/docs/runner.md),
+//! [tools](https://github.com/genai-rs/genai-agents/blob/main/docs/tools.md),
+//! [sessions](https://github.com/genai-rs/genai-agents/blob/main/docs/sessions.md),
+//! [tracing](https://github.com/genai-rs/genai-agents/blob/main/docs/tracing.md) and
+//! [recorded runs](https://github.com/genai-rs/genai-agents/blob/main/docs/recording.md).
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -91,7 +99,9 @@ mod error;
 mod item;
 mod model;
 mod platform;
+pub mod record;
 pub mod runner;
+pub mod session;
 #[cfg(feature = "testing")]
 #[cfg_attr(docsrs, doc(cfg(feature = "testing")))]
 pub mod testing;
@@ -109,10 +119,20 @@ pub use model::{
 };
 pub use platform::{BoxFuture, BoxStream, MaybeSend, MaybeSync};
 pub use runner::{
-    CancellationSignal, PromptCacheKey, RetryConfig, RunConfig, RunEvent, RunOutcome, RunStop,
-    Runner, ToolSearchConfig, TurnRecord, CUT_OFF_OUTPUT, TOOL_SEARCH,
+    CacheBreak, CancellationSignal, PromptCacheKey, RetryConfig, RunConfig, RunEvent, RunOutcome,
+    RunStop, Runner, ToolSearchConfig, TurnRecord, CUT_OFF_OUTPUT, TOOL_SEARCH,
 };
 pub use tools::ToolRegistry;
+
+/// The examples of the sessions guide (`docs/sessions.md`), compiled and run as doc tests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/sessions.md")]
+pub struct SessionsGuide;
+
+/// The examples of the recorded runs guide (`docs/recording.md`), compiled as doc tests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/recording.md")]
+pub struct RecordingGuide;
 
 /// The examples of the tools guide (`docs/tools.md`), compiled and run as doc tests.
 #[cfg(doctest)]

@@ -167,7 +167,8 @@ pub trait RichTool: MaybeSend + MaybeSync {
 }
 
 /// The syntax of a [`CustomFormat::Grammar`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum GrammarSyntax {
     /// A [Lark](https://lark-parser.readthedocs.io/) grammar.
@@ -188,7 +189,8 @@ impl GrammarSyntax {
 }
 
 /// The input format of a [`CustomTool`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CustomFormat {
     /// Any text.

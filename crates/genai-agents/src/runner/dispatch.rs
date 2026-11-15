@@ -11,8 +11,10 @@ use std::collections::VecDeque;
 use std::task::{Context, Poll};
 
 use futures::stream::{FuturesUnordered, Stream};
+use tracing::field::Empty;
+use tracing::Instrument;
 
-use crate::item::{ToolCall, ToolOutput};
+use crate::item::{ToolCall, ToolKind, ToolOutput};
 use crate::platform::{BoxFuture, Instant};
 use crate::tools::{ToolError, ToolRegistry};
 
@@ -32,11 +34,20 @@ pub(super) struct Dispatcher<'r> {
     running: FuturesUnordered<Running<'r>>,
     parallel_running: usize,
     exclusive_running: bool,
+    /// The run's span: the parent of the calls' spans.
+    span: tracing::Span,
+    trace_content: bool,
 }
 
 impl<'r> Dispatcher<'r> {
-    pub(super) fn new(registry: &'r ToolRegistry) -> Self {
+    pub(super) fn new(
+        registry: &'r ToolRegistry,
+        span: tracing::Span,
+        trace_content: bool,
+    ) -> Self {
         Self {
+            span,
+            trace_content,
             registry,
             slots: Vec::new(),
             queue: VecDeque::new(),
@@ -89,9 +100,32 @@ impl<'r> Dispatcher<'r> {
             slot.started = Some(Instant::now());
             let call = slot.call.clone();
             let registry = self.registry;
-            self.running.push(Box::pin(async move {
-                (index, registry.answer_call(call).await)
-            }));
+            let span = tool_span(&self.span, &call, self.trace_content);
+            let trace_content = self.trace_content;
+            self.running.push(Box::pin(
+                async move {
+                    let answer = registry.answer_call(call).await;
+                    let current = tracing::Span::current();
+                    match &answer {
+                        Ok(output) => {
+                            if !output.success {
+                                current.record("error.type", "tool_error");
+                            }
+                            if trace_content {
+                                if let Some(text) = output.body.to_text() {
+                                    current.record("gen_ai.tool.call.result", text.as_str());
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            current.record("otel.status_code", "ERROR");
+                            current.record("error.type", "fatal");
+                        }
+                    }
+                    (index, answer)
+                }
+                .instrument(span),
+            ));
         }
     }
 
@@ -190,4 +224,27 @@ impl<'r> Dispatcher<'r> {
             .filter_map(|(_, answer)| answer)
             .collect()
     }
+}
+
+/// The `execute_tool` span of a call, a child of the run's span.
+fn tool_span(parent: &tracing::Span, call: &ToolCall, trace_content: bool) -> tracing::Span {
+    let kind = match call.kind {
+        ToolKind::Custom => "custom",
+        _ => "function",
+    };
+    tracing::info_span!(
+        parent: parent,
+        "execute_tool",
+        otel.name = super::trace::span_name("execute_tool", &call.name),
+        otel.kind = "internal",
+        otel.status_code = Empty,
+        gen_ai.operation.name = "execute_tool",
+        gen_ai.tool.name = call.name.as_str(),
+        gen_ai.tool.namespace = call.namespace.as_deref(),
+        gen_ai.tool.call.id = call.call_id.as_str(),
+        gen_ai.tool.type = kind,
+        gen_ai.tool.call.arguments = trace_content.then_some(call.input.as_str()),
+        gen_ai.tool.call.result = Empty,
+        error.type = Empty,
+    )
 }

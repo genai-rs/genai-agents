@@ -1,6 +1,6 @@
 # Design
 
-Status: proposed. Nothing on this page is implemented yet.
+Status: slices 1 and 2 are implemented; the rest is proposed. The guides describe what is implemented.
 
 genai-agents runs agents: a model, instructions and tools, called in a loop until the model answers. It takes the
 feature list of OpenAI's [Agents SDK](https://openai.github.io/openai-agents-python) (Python and TypeScript; there
@@ -179,7 +179,8 @@ pub enum SessionEntry {
   input sent twice is stored once (OpenClaw).
 - A session has an explicit id; there is no shared default (OpenClaw's shared default session leaked one user's
   conversation to another).
-- Stores: in memory, JSONL files, SQLite (`sqlx`, not on WebAssembly). Other stores implement the trait.
+- Stores: in memory, JSONL files, SQLite (`genai-agents-sqlite`, on rusqlite with SQLite built in; not on
+  WebAssembly). Other stores implement the trait.
 
 ### Tracing (slice 2)
 

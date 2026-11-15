@@ -28,6 +28,7 @@
 mod cancel;
 mod config;
 mod dispatch;
+mod trace;
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -36,18 +37,22 @@ use std::task::Poll;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tracing::field::Empty;
+use tracing::Instrument;
 
 pub use cancel::CancellationSignal;
 pub use config::{PromptCacheKey, RetryConfig, RunConfig, ToolSearchConfig};
+pub use trace::CacheBreak;
 
 use crate::conversation::Conversation;
 use crate::error::{Error, ModelError, Result, RetryClass};
 use crate::item::{Item, ItemMeta, Message, Role, ToolCall, ToolKind, ToolOutput};
 use crate::model::{
-    Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelStream, RateLimits, StopReason,
-    ToolDefinition, Usage,
+    Model, ModelEvent, ModelInfo, ModelRequest, ModelResponse, ModelStream, RateLimits,
+    ReasoningLevel, StopReason, ToolDefinition, Usage,
 };
-use crate::platform::{random_jitter, random_u64, sleep, MaybeSend};
+use crate::platform::{random_jitter, random_u64, sleep, Instant, MaybeSend};
+use crate::session::{Session, SessionEntry, SessionStore, TurnSettings};
 use crate::tools::{Advertise, Exposure, ToolError, ToolKey, ToolRegistry};
 use dispatch::Dispatcher;
 
@@ -119,6 +124,9 @@ pub struct TurnRecord {
     pub usage: Option<Usage>,
     /// Why the model stopped, when the provider says.
     pub stop: Option<StopReason>,
+    /// Why the request could not reuse the prompt cache of the request before it, if it could
+    /// not; `None` for the first request of a runner.
+    pub cache_break: Option<CacheBreak>,
 }
 
 impl TurnRecord {
@@ -134,6 +142,7 @@ impl TurnRecord {
             output_tokens: None,
             usage: None,
             stop: None,
+            cache_break: None,
         }
     }
 
@@ -249,6 +258,8 @@ struct State {
     config: RunConfig,
     loaded: BTreeSet<ToolKey>,
     cache_key: String,
+    /// What the previous request sent, for [`TurnRecord::cache_break`].
+    last_shape: Option<trace::RequestShape>,
 }
 
 impl<M: Model> Runner<M> {
@@ -261,6 +272,7 @@ impl<M: Model> Runner<M> {
                 config: RunConfig::default(),
                 loaded: BTreeSet::new(),
                 cache_key: format!("genai-agents-{:016x}", random_u64()),
+                last_shape: None,
             },
         }
     }
@@ -347,17 +359,98 @@ impl<M: Model> Runner<M> {
         &mut self,
         conversation: &mut Conversation,
         cancel: &CancellationSignal,
-        mut on_event: F,
+        on_event: F,
     ) -> Result<RunOutcome>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
+        let span = self.run_span(None);
+        self.run_inner(conversation, cancel, on_event, &mut NoSink, &span)
+            .instrument(span.clone())
+            .await
+    }
+
+    /// Run on a [`Session`]: on its [conversation](Session::conversation), as
+    /// [`run_with`](Self::run_with) does, appending to the session what the run adds after each
+    /// request (the model's items and the answers to its calls, the model settings when they
+    /// changed, the usage), so that a run that stops or fails half-way leaves its finished turns
+    /// in the session.
+    ///
+    /// The input goes into the session before the run, with
+    /// [`append_input`](Session::append_input) or [`append_item`](Session::append_item). The
+    /// spans carry the session's id as `gen_ai.conversation.id`.
+    ///
+    /// # Errors
+    ///
+    /// As [`run_with`](Self::run_with), and [`Error::Session`] when the session cannot be
+    /// written, such as when another handle opened it since
+    /// ([`SessionError::Superseded`](crate::session::SessionError::Superseded)).
+    pub async fn run_session<S, F>(
+        &mut self,
+        session: &mut Session<S>,
+        cancel: &CancellationSignal,
+        on_event: F,
+    ) -> Result<RunOutcome>
+    where
+        S: SessionStore,
+        F: FnMut(RunEvent<'_>) + MaybeSend,
+    {
+        let mut conversation = session.conversation();
+        let span = self.run_span(Some(session.id().as_str()));
+        let mut sink = SessionSink {
+            synced: conversation.len(),
+            session,
+        };
+        self.run_inner(&mut conversation, cancel, on_event, &mut sink, &span)
+            .instrument(span.clone())
+            .await
+    }
+
+    /// The `invoke_agent` span of a run.
+    fn run_span(&self, conversation: Option<&str>) -> tracing::Span {
+        let info = self.model.info();
+        let name = self.state.config.name.as_deref().unwrap_or_default();
+        let origin = info.origin.as_ref();
+        tracing::info_span!(
+            "invoke_agent",
+            otel.name = trace::span_name("invoke_agent", name),
+            otel.kind = "internal",
+            otel.status_code = Empty,
+            gen_ai.operation.name = "invoke_agent",
+            gen_ai.agent.name = (!name.is_empty()).then_some(name),
+            gen_ai.provider.name = origin.map(|origin| origin.provider.as_str()),
+            gen_ai.request.model = origin.map(|origin| origin.model.as_str()),
+            gen_ai.conversation.id = conversation,
+            gen_ai.usage.input_tokens = Empty,
+            gen_ai.usage.output_tokens = Empty,
+            error.type = Empty,
+        )
+    }
+
+    /// The settings the session records for this run's requests.
+    fn turn_settings(&self) -> TurnSettings {
+        TurnSettings::new(self.model.info().origin, self.state.config.model_settings)
+    }
+
+    async fn run_inner<F, K>(
+        &mut self,
+        conversation: &mut Conversation,
+        cancel: &CancellationSignal,
+        mut on_event: F,
+        sink: &mut K,
+        span: &tracing::Span,
+    ) -> Result<RunOutcome>
+    where
+        F: FnMut(RunEvent<'_>) + MaybeSend,
+        K: Sink,
+    {
         let registry = Arc::clone(&self.state.registry);
+        let settings = self.turn_settings();
         let mut turns = Vec::new();
         let mut iteration = 0_u32;
-        loop {
+        let result = loop {
             if cancel.is_cancelled() {
-                return Ok(RunOutcome::new(RunStop::Cancelled, turns));
+                break Ok(RunOutcome::new(RunStop::Cancelled, turns));
             }
             if self
                 .state
@@ -365,11 +458,12 @@ impl<M: Model> Runner<M> {
                 .max_iterations
                 .is_some_and(|max| iteration >= max.get())
             {
-                return Ok(RunOutcome::new(RunStop::MaxIterations, turns));
+                break Ok(RunOutcome::new(RunStop::MaxIterations, turns));
             }
             iteration += 1;
             let mut turn = TurnRecord::new(iteration);
-            let mut dispatcher = Dispatcher::new(&registry);
+            let mut dispatcher =
+                Dispatcher::new(&registry, span.clone(), self.state.config.trace_content);
             let end = self
                 .turn(
                     conversation,
@@ -385,7 +479,7 @@ impl<M: Model> Runner<M> {
                     let answers = dispatcher.finished_answers();
                     self.state
                         .record_outputs(conversation, answers, &self.model.info());
-                    return Err(error);
+                    break Err(error);
                 }
             };
             match end {
@@ -394,27 +488,57 @@ impl<M: Model> Runner<M> {
                     self.state
                         .record_outputs(conversation, answers, &self.model.info());
                     turns.push(turn);
-                    return Ok(RunOutcome::new(RunStop::Cancelled, turns));
+                    break Ok(RunOutcome::new(RunStop::Cancelled, turns));
                 }
-                AttemptEnd::Failed(failure) => return Err(Error::Model(failure)),
+                AttemptEnd::Failed(failure) => break Err(Error::Model(failure)),
                 AttemptEnd::Done { incomplete, calls } => {
+                    sink.commit(conversation, turn.usage, &settings).await?;
                     on_event(RunEvent::TurnDone(&turn));
                     turns.push(turn);
                     match incomplete {
                         Some(_) => {
-                            return Ok(RunOutcome::new(
+                            break Ok(RunOutcome::new(
                                 RunStop::Incomplete { reason: incomplete },
                                 turns,
                             ));
                         }
                         None if calls == 0 => {
-                            return Ok(RunOutcome::new(RunStop::Completed, turns));
+                            break Ok(RunOutcome::new(RunStop::Completed, turns));
                         }
                         None => {}
                     }
                 }
             }
+        };
+        // What the last turn added when it stopped early (cancelled, failed) goes into the
+        // session too; a failure to write it does not hide the run's own error.
+        let committed = sink.commit(conversation, None, &settings).await;
+        let result = match (result, committed) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(lost)) => {
+                tracing::warn!(error = %lost, "the session could not be written after a failed run");
+                Err(error)
+            }
+        };
+        match &result {
+            Ok(outcome) => {
+                let (input, output) = outcome.turns.iter().filter_map(|turn| turn.usage).fold(
+                    (0_i64, 0_i64),
+                    |(input, output), usage| {
+                        (input + usage.input_tokens, output + usage.output_tokens)
+                    },
+                );
+                span.record("gen_ai.usage.input_tokens", input);
+                span.record("gen_ai.usage.output_tokens", output);
+            }
+            Err(error) => {
+                span.record("otel.status_code", "ERROR");
+                span.record("error.type", error_type(error));
+            }
         }
+        result
     }
 
     /// One model request, with its retries, and its tool calls.
@@ -481,7 +605,14 @@ impl<M: Model> Runner<M> {
                 delay,
                 error: &failure,
             });
-            tracing::debug!(attempt, ?delay, error = %failure, "retrying the request");
+            tracing::info!(
+                attempt,
+                max = retry.max_retries,
+                delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                error.type = failure.kind().as_str(),
+                error = %failure,
+                "retrying the request"
+            );
             let slept =
                 futures::future::select(Box::pin(sleep(delay)), Box::pin(cancel.cancelled())).await;
             if matches!(slept, futures::future::Either::Right(_)) {
@@ -532,8 +663,96 @@ impl<M: Model> Runner<M> {
         Ok(true)
     }
 
-    /// One request: sent, its events read, its calls started as they come.
+    /// One request, in its `chat` span.
     async fn attempt<F>(
+        &mut self,
+        conversation: &mut Conversation,
+        dispatcher: &mut Dispatcher<'_>,
+        turn: &mut TurnRecord,
+        cancel: &CancellationSignal,
+        on_event: &mut F,
+    ) -> Result<AttemptEnd>
+    where
+        F: FnMut(RunEvent<'_>) + MaybeSend,
+    {
+        let info = self.model.info();
+        let origin = info.origin.as_ref();
+        let model = origin
+            .map(|origin| origin.model.as_str())
+            .unwrap_or_default();
+        let settings = self.state.config.model_settings;
+        let span = tracing::info_span!(
+            "chat",
+            otel.name = trace::span_name("chat", model),
+            otel.kind = "client",
+            otel.status_code = Empty,
+            gen_ai.operation.name = "chat",
+            gen_ai.provider.name = origin.map(|origin| origin.provider.as_str()),
+            gen_ai.request.model = (!model.is_empty()).then_some(model),
+            gen_ai.request.max_tokens = settings.max_output_tokens,
+            gen_ai.request.reasoning = settings.reasoning.map(ReasoningLevel::as_str),
+            gen_ai.response.id = Empty,
+            gen_ai.response.finish_reasons = Empty,
+            gen_ai.usage.input_tokens = Empty,
+            gen_ai.usage.output_tokens = Empty,
+            gen_ai.usage.cache_read.input_tokens = Empty,
+            gen_ai.usage.cache_creation.input_tokens = Empty,
+            gen_ai.usage.reasoning.output_tokens = Empty,
+            gen_ai.input.messages = Empty,
+            gen_ai.output.messages = Empty,
+            genai_agents.iteration = turn.iteration,
+            genai_agents.retry = turn.retries,
+            genai_agents.time_to_first_token_ms = Empty,
+            genai_agents.cache_break = Empty,
+            error.type = Empty,
+        );
+        let before = conversation.len();
+        let end = self
+            .attempt_inner(conversation, dispatcher, turn, cancel, on_event)
+            .instrument(span.clone())
+            .await;
+        if let Some(id) = &turn.response_id {
+            span.record("gen_ai.response.id", id.as_str());
+        }
+        if let Some(stop) = &turn.stop {
+            span.record("gen_ai.response.finish_reasons", stop_name(stop));
+        }
+        if let Some(usage) = turn.usage {
+            span.record("gen_ai.usage.input_tokens", usage.input_tokens);
+            span.record("gen_ai.usage.output_tokens", usage.output_tokens);
+            if let Some(tokens) = usage.cache_read_tokens {
+                span.record("gen_ai.usage.cache_read.input_tokens", tokens);
+            }
+            if let Some(tokens) = usage.cache_write_tokens {
+                span.record("gen_ai.usage.cache_creation.input_tokens", tokens);
+            }
+            if let Some(tokens) = usage.reasoning_tokens {
+                span.record("gen_ai.usage.reasoning.output_tokens", tokens);
+            }
+        }
+        if self.state.config.trace_content {
+            let output: Vec<Item> = conversation.items()[before.min(conversation.len())..]
+                .iter()
+                .filter(|item| !matches!(item, Item::ToolOutput(_)))
+                .cloned()
+                .collect();
+            span.record("gen_ai.output.messages", trace::messages(&output));
+        }
+        let failure = match &end {
+            Ok(AttemptEnd::Failed(failure)) => Some(failure.kind().as_str()),
+            Ok(AttemptEnd::Cancelled) => Some("cancelled"),
+            Err(error) => Some(error_type(error)),
+            Ok(AttemptEnd::Done { .. }) => None,
+        };
+        if let Some(kind) = failure {
+            span.record("otel.status_code", "ERROR");
+            span.record("error.type", kind);
+        }
+        end
+    }
+
+    /// One request: sent, its events read, its calls started as they come.
+    async fn attempt_inner<F>(
         &mut self,
         conversation: &mut Conversation,
         dispatcher: &mut Dispatcher<'_>,
@@ -549,6 +768,31 @@ impl<M: Model> Runner<M> {
         let caps = model.info();
         let tools = state.definitions(&caps);
         let projection = conversation.for_request(&caps);
+        let shape = trace::RequestShape::new(
+            caps.origin
+                .as_ref()
+                .map_or("", |origin| origin.model.as_str()),
+            &tools,
+            state.config.model_settings,
+            state.prompt_cache_key(),
+            projection.items(),
+        );
+        if turn.retries == 0 {
+            turn.cache_break = state
+                .last_shape
+                .as_ref()
+                .and_then(|previous| shape.break_from(previous));
+            if let Some(cache_break) = turn.cache_break {
+                tracing::Span::current().record("genai_agents.cache_break", cache_break.as_str());
+            }
+        }
+        state.last_shape = Some(shape);
+        if state.config.trace_content {
+            tracing::Span::current()
+                .record("gen_ai.input.messages", trace::messages(projection.items()));
+        }
+        let started = Instant::now();
+        let mut first_token = true;
         let meta = ItemMeta {
             turn: Some(conversation.next_turn()),
             ..ItemMeta::default()
@@ -628,6 +872,19 @@ impl<M: Model> Runner<M> {
                 Step::Event(Some(Ok(event))) => event,
             };
             on_event(RunEvent::Model(&event));
+            if first_token
+                && matches!(
+                    event,
+                    ModelEvent::TextDelta(_)
+                        | ModelEvent::ReasoningDelta(_)
+                        | ModelEvent::ToolCallArgsDelta { .. }
+                        | ModelEvent::ItemDone(_)
+                )
+            {
+                first_token = false;
+                let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                tracing::Span::current().record("genai_agents.time_to_first_token_ms", elapsed);
+            }
             match event {
                 ModelEvent::TextDelta(delta) => partial.push_str(&delta),
                 ModelEvent::ItemDone(mut item) => {
@@ -902,4 +1159,76 @@ fn search_schema() -> Value {
         "required": ["query"],
         "additionalProperties": false,
     })
+}
+
+/// Where a run writes what it adds: nowhere ([`Runner::run_with`]) or a session.
+trait Sink: MaybeSend {
+    /// Write the items added since the last commit, the model settings when they changed, and
+    /// the usage of a response.
+    fn commit(
+        &mut self,
+        conversation: &Conversation,
+        usage: Option<Usage>,
+        settings: &TurnSettings,
+    ) -> impl Future<Output = Result<()>> + MaybeSend;
+}
+
+struct NoSink;
+
+impl Sink for NoSink {
+    async fn commit(&mut self, _: &Conversation, _: Option<Usage>, _: &TurnSettings) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct SessionSink<'s, S> {
+    session: &'s mut Session<S>,
+    /// The items of the conversation the session has.
+    synced: usize,
+}
+
+impl<S: SessionStore> Sink for SessionSink<'_, S> {
+    async fn commit(
+        &mut self,
+        conversation: &Conversation,
+        usage: Option<Usage>,
+        settings: &TurnSettings,
+    ) -> Result<()> {
+        let items = conversation.items().get(self.synced..).unwrap_or_default();
+        if items.is_empty() && usage.is_none() {
+            return Ok(());
+        }
+        let mut entries = Vec::with_capacity(items.len() + 2);
+        if !items.is_empty() && self.session.turn_settings() != Some(settings) {
+            entries.push(SessionEntry::TurnSettings(settings.clone()));
+        }
+        entries.extend(items.iter().cloned().map(SessionEntry::Item));
+        entries.extend(usage.map(SessionEntry::Usage));
+        self.session.append_all(entries).await?;
+        self.synced = conversation.len();
+        Ok(())
+    }
+}
+
+/// The `error.type` of a run's error.
+fn error_type(error: &Error) -> &'static str {
+    match error {
+        Error::Model(failure) => failure.kind().as_str(),
+        Error::Tool(_) => "tool",
+        Error::Session(_) => "session",
+        Error::Json(_) => "json",
+        _ => "other",
+    }
+}
+
+/// A stop reason as `gen_ai.response.finish_reasons` names it.
+fn stop_name(stop: &StopReason) -> &str {
+    match stop {
+        StopReason::Stop => "stop",
+        StopReason::ToolUse => "tool_calls",
+        StopReason::Length => "length",
+        StopReason::ContentFilter => "content_filter",
+        StopReason::Aborted => "aborted",
+        StopReason::Other(other) => other,
+    }
 }

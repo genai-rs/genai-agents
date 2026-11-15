@@ -166,3 +166,24 @@ async fn a_cancelled_run_answers_every_call() {
     assert_eq!(calls.get(), 0);
     assert!(conversation.unanswered_calls().is_empty());
 }
+
+#[wasm_bindgen_test]
+async fn a_run_writes_into_a_session_in_memory() {
+    use genai_agents::session::{MemoryStore, Session, SessionId};
+
+    let model = Scripted {
+        replies: RefCell::new(vec![Ok(vec![Item::assistant("Hello.")])]),
+        requests: Rc::new(Cell::new(0)),
+    };
+    let store = MemoryStore::new();
+    let mut session = Session::open(&store, SessionId::new("wasm")).await.unwrap();
+    session.append_input("m1", Item::user("Hi")).await.unwrap();
+    let mut runner = Runner::new(model, ToolRegistry::new());
+    let outcome = runner
+        .run_session(&mut session, &CancellationSignal::new(), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(outcome.stop, RunStop::Completed);
+    let reopened = Session::open(&store, SessionId::new("wasm")).await.unwrap();
+    assert_eq!(reopened.conversation().len(), 2);
+}
