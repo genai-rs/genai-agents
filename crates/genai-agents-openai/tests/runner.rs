@@ -19,10 +19,10 @@ use bytes::Bytes;
 use futures::StreamExt;
 use genai_agents::tools::{Exposure, FunctionTool, ToolKey, ToolRegistry};
 use genai_agents::{
-    CancellationSignal, Conversation, Error, Item, ItemMeta, Message, Model, ModelEvent, ModelInfo,
-    ModelSettings, Origin, PromptCacheKey, Reasoning, ReasoningLevel, Result, RetryConfig, Role,
-    RunConfig, RunEvent, RunStop, Runner, StopReason, ToolCall, ToolOutput, ToolOutputBody, Usage,
-    CUT_OFF_OUTPUT,
+    CancellationSignal, ContextConfig, Conversation, Error, Item, ItemMeta, Message, Model,
+    ModelEvent, ModelInfo, ModelSettings, Origin, PromptCacheKey, Reasoning, ReasoningLevel,
+    Result, RetryConfig, Role, RunConfig, RunEvent, RunStop, Runner, StopReason, ToolCall,
+    ToolOutput, ToolOutputBody, Usage, CUT_OFF_OUTPUT,
 };
 use genai_agents_openai::{Compat, OpenAiChat, OpenAiResponses, PROVIDER, RESPONSES_API};
 use openai_ergonomic::{ChatCompletionBuilder, Client, Config, ResponsesBuilder};
@@ -753,17 +753,26 @@ async fn retries_stop_at_errors_that_cannot_be_retried_and_at_the_limit() {
         .is_completed());
     assert_eq!(seen.lock().unwrap().len(), 2);
 
-    // So is an `error` event, unless its code says it will not help.
-    let (client, seen) = scripted(|_, _| {
+    // So is an `error` event, unless its code says it will not help: a context that is too long
+    // is not retried, but compacted (once), and the run fails when that is too long as well.
+    let too_long = |_: usize, _: &_| {
         Reply::sse(&[json!({"type": "error", "sequence_number": 0,
                              "code": "context_length_exceeded", "message": "too long"})])
-    });
+    };
+    let (client, seen) = scripted(too_long);
     let mut runner = Runner::new(OpenAiResponses::new(client, template()), weather_tools());
     let error = runner.run(&mut Conversation::user("hi")).await.unwrap_err();
     assert_eq!(
         error.as_model().unwrap().code(),
         Some("context_length_exceeded")
     );
+    assert_eq!(seen.lock().unwrap().len(), 2); // the request, then the compaction's
+    let (client, seen) = scripted(too_long);
+    let mut runner = Runner::new(OpenAiResponses::new(client, template()), weather_tools())
+        .with_config(
+            RunConfig::new().with_context(ContextConfig::new().with_compact_on_overflow(false)),
+        );
+    runner.run(&mut Conversation::user("hi")).await.unwrap_err();
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
 

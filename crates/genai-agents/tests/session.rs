@@ -6,13 +6,13 @@
 use std::time::Duration;
 
 use genai_agents::session::{
-    Compaction, EntryId, MemoryStore, Session, SessionEntry, SessionError, SessionId, SessionStore,
+    EntryId, MemoryStore, Session, SessionEntry, SessionError, SessionId, SessionStore,
 };
 use genai_agents::testing::{Reply, ScriptedModel};
 use genai_agents::tools::{FunctionTool, ToolRegistry};
 use genai_agents::{
-    CancellationSignal, Error, Item, ModelEvent, ModelInfo, Origin, ReasoningLevel, Result, Role,
-    RunConfig, RunStop, Runner, ToolCall, Usage,
+    CancellationSignal, Compaction, Error, Item, ModelEvent, ModelInfo, Origin, ReasoningLevel,
+    Result, Role, RunConfig, RunStop, Runner, ToolCall, Usage, SUMMARY_PREFIX,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -221,32 +221,37 @@ async fn the_conversation_starts_at_the_latest_compaction() {
     let mut session = Session::open(&store, SessionId::new("s")).await.unwrap();
     session.append_item(Item::user("q1")).await.unwrap();
     session.append_item(Item::assistant("a1")).await.unwrap();
-    let q2 = session.append_item(Item::user("q2")).await.unwrap();
+    session.append_item(Item::user("q2")).await.unwrap();
     session.append_item(Item::assistant("a2")).await.unwrap();
     session
-        .append(SessionEntry::Compaction(
-            Compaction::new("They asked twice.").with_first_kept(q2),
-        ))
+        .append_item(Compaction::new("They asked twice.").with_kept(vec![Item::user("q2")]))
         .await
         .unwrap();
     session.append_item(Item::user("q3")).await.unwrap();
 
+    // The session's conversation starts at the compaction; its request, at what it keeps.
     let conversation = session.conversation();
-    assert_eq!(texts(&session), ["They asked twice.", "q2", "a2", "q3"]);
-    let Item::Message(summary) = &conversation.items()[0] else {
+    assert_eq!(conversation.len(), 2);
+    let request = conversation.for_request(&ModelInfo::default());
+    let sent: Vec<String> = request
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Message(message) => Some(message.text_content()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[0], "q2");
+    assert!(sent[1].starts_with(SUMMARY_PREFIX) && sent[1].ends_with("They asked twice."));
+    assert_eq!(sent[2], "q3");
+    let Item::Message(summary) = &request.items()[1] else {
         panic!()
     };
     assert_eq!(summary.role, Role::User);
     assert!(summary.meta.injected);
-    // The summary is not a user input to roll back to.
+    // The records before it stay; the user's messages can still be rolled back to.
     assert_eq!(session.user_inputs().len(), 3);
-
-    // A compaction that keeps nothing.
-    session
-        .append(SessionEntry::Compaction(Compaction::new("All of it.")))
-        .await
-        .unwrap();
-    assert_eq!(texts(&session), ["All of it."]);
 }
 
 #[tokio::test]
@@ -271,11 +276,13 @@ async fn a_cancelled_run_leaves_its_partial_turn_in_the_session() {
     assert_eq!(outcome.stop, RunStop::Cancelled);
     let reopened = Session::open(&store, SessionId::new("s")).await.unwrap();
     let items = reopened.conversation();
-    assert_eq!(items.len(), 2);
+    // The question, the partial answer, and the note that the run was interrupted.
+    assert_eq!(items.len(), 3);
     let Item::Message(partial) = &items.items()[1] else {
         panic!()
     };
     assert!(partial.meta.interrupted);
+    assert!(matches!(&items.items()[2], Item::Message(note) if note.meta.injected));
 }
 
 #[tokio::test]

@@ -22,14 +22,15 @@ What works today:
 - sessions: an append-only log with rollback, forks and guarded writes, in memory, JSON Lines files or SQLite;
 - tracing with OpenTelemetry's GenAI conventions, to Langfuse or any OpenTelemetry backend;
 - recorded runs, replayed in tests without a network;
+- context management: compaction, pruning of old tool outputs, input while a run is going, guards against loops;
 - natively and on WebAssembly.
 
-Context management, agents with guardrails and handoffs, evals, MCP and skills come next: see the
-[design](docs/design.md).
+Agents with guardrails and handoffs, evals, MCP and skills come next: see the [design](docs/design.md).
 
 - [The runner](docs/runner.md)
 - [Tools](docs/tools.md)
 - [Sessions](docs/sessions.md)
+- [Context management](docs/context.md)
 - [Tracing](docs/tracing.md)
 - [Recorded runs](docs/recording.md)
 

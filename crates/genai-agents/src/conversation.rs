@@ -121,6 +121,11 @@ impl Conversation {
         &self.items
     }
 
+    /// The items, to change them in place (a projection's, say).
+    pub(crate) fn items_mut(&mut self) -> &mut [Item] {
+        &mut self.items
+    }
+
     /// The items, by value.
     #[must_use]
     pub fn into_items(self) -> Vec<Item> {
@@ -273,10 +278,36 @@ impl Conversation {
         repair(&mut self.items, info)
     }
 
+    /// The index of the latest [compaction](Item::Compaction), if any.
+    #[must_use]
+    pub fn latest_compaction(&self) -> Option<usize> {
+        self.items
+            .iter()
+            .rposition(|item| matches!(item, Item::Compaction(_)))
+    }
+
+    /// The items a request is built from: from the latest [compaction](Item::Compaction) on,
+    /// with the compaction [expanded](crate::Compaction::expand) into the items it sends; every
+    /// item when there is none.
+    #[must_use]
+    pub fn active_items(&self) -> Vec<Item> {
+        let Some(at) = self.latest_compaction() else {
+            return self.items.clone();
+        };
+        let Item::Compaction(compaction) = &self.items[at] else {
+            return self.items.clone();
+        };
+        let mut items = compaction.expand();
+        items.extend(self.items[at + 1..].iter().cloned());
+        items
+    }
+
     /// The conversation as a request to the model `info` describes: a copy, repaired and fitted
     /// to the model; the conversation itself does not change. The same conversation gives the
     /// same projection, byte for byte, so the provider's prompt cache holds.
     ///
+    /// - It starts at the latest [compaction](Item::Compaction): the items before it are not
+    ///   sent, the compaction sends what it kept and its summary ([`Self::active_items`]).
     /// - Items cut off ([`ItemMeta::interrupted`]: the partial text of a cancelled or failed
     ///   response) are left out; a cut-off call stays, with its answer.
     /// - Reasoning and provider items another model wrote are left out, and so is the provider
@@ -298,8 +329,9 @@ impl Conversation {
     pub fn project(&self, info: &ModelInfo) -> (Self, ProjectionReport) {
         let mut report = ProjectionReport::default();
         let target = info.origin.as_ref();
-        let mut items = Vec::with_capacity(self.items.len());
-        for item in &self.items {
+        let active = self.active_items();
+        let mut items = Vec::with_capacity(active.len());
+        for item in &active {
             let meta = item.meta();
             if meta.interrupted && !matches!(item, Item::ToolCall(_)) {
                 report.interrupted += 1;

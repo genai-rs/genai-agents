@@ -1196,6 +1196,12 @@ impl ToolRegistry {
         self.tools.get(key).map(|tool| tool.description.as_str())
     }
 
+    /// Whether a tool of this name is registered, in any namespace.
+    #[must_use]
+    pub fn has_tool_named(&self, name: &str) -> bool {
+        self.keys().any(|key| key.name == name)
+    }
+
     /// The registered tools, namespaced ones included, in order.
     pub fn keys(&self) -> impl Iterator<Item = &ToolKey> {
         self.tools.keys()

@@ -2,11 +2,11 @@
 //!
 //! A [`Session`] is a log of [`Record`]s in a [`SessionStore`]. Each record holds one
 //! [`SessionEntry`] (an item of the conversation, the model settings from then on, the usage the
-//! server reported, a compaction, a label, or an entry of the application's own) and points at
+//! server reported, a label, or an entry of the application's own) and points at
 //! the record before it, so that the log is a tree:
 //!
 //! - the conversation is the path from the first record to the *head*, the latest record
-//!   ([`Session::conversation`]), from its latest [compaction](Compaction) on;
+//!   ([`Session::conversation`]), from its latest [compaction](crate::Compaction) on;
 //! - [`rollback`](Session::rollback) moves the head back to an earlier record; the records after
 //!   it stay in the log, off the path;
 //! - [`fork`](Session::fork) copies the path up to a record into a new session.
@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::conversation::Conversation;
-use crate::item::{Item, ItemMeta, Message, Origin, Role};
+use crate::item::{Item, Origin, Role};
 use crate::model::{ModelSettings, Usage};
 use crate::platform::{random_u64, MaybeSend, MaybeSync};
 
@@ -178,49 +178,6 @@ impl TurnSettings {
     }
 }
 
-/// A summary that stands in for the conversation before it.
-///
-/// The conversation of a session starts at its latest compaction: the summary, as an injected
-/// user message ([`ItemMeta::injected`]), then the items from [`first_kept`](Self::first_kept)
-/// on, then those after the compaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct Compaction {
-    /// The summary of what came before.
-    pub summary: String,
-    /// The first record before the compaction whose item is still sent after the summary (the
-    /// recent user messages, say); `None` when the summary replaces everything before it.
-    pub first_kept: Option<EntryId>,
-    /// The input tokens of the conversation it replaced, when known.
-    pub tokens_before: Option<u64>,
-}
-
-impl Compaction {
-    /// A summary that replaces everything before it.
-    #[must_use]
-    pub fn new(summary: impl Into<String>) -> Self {
-        Self {
-            summary: summary.into(),
-            first_kept: None,
-            tokens_before: None,
-        }
-    }
-
-    /// The same compaction, keeping the items from this record on.
-    #[must_use]
-    pub fn with_first_kept(mut self, first_kept: EntryId) -> Self {
-        self.first_kept = Some(first_kept);
-        self
-    }
-
-    /// The same compaction, with the tokens of what it replaced.
-    #[must_use]
-    pub fn with_tokens_before(mut self, tokens: u64) -> Self {
-        self.tokens_before = Some(tokens);
-        self
-    }
-}
-
 /// What a record holds.
 ///
 /// New variants may be added in minor releases: match with a wildcard arm.
@@ -234,8 +191,6 @@ pub enum SessionEntry {
     TurnSettings(TurnSettings),
     /// What the server reported a response used.
     Usage(Usage),
-    /// A summary that stands in for the conversation before it.
-    Compaction(Compaction),
     /// A name for this point of the conversation, to roll back or fork to.
     Label(String),
     /// An entry of the application's own, never sent to the model.
@@ -542,31 +497,16 @@ impl<S: SessionStore> Session<S> {
         path
     }
 
-    /// The conversation to run on: the items on the path, from the latest compaction on (its
-    /// summary first, as an injected user message).
+    /// The conversation to run on: the items on the path, from the latest
+    /// [compaction](Item::Compaction) on (the items before it are not sent).
     #[must_use]
     pub fn conversation(&self) -> Conversation {
-        let path = self.path();
-        let compaction = path
+        let items: Vec<Item> = self.path().into_iter().filter_map(item_of).collect();
+        let from = items
             .iter()
-            .rposition(|record| matches!(record.entry, SessionEntry::Compaction(_)));
-        let Some(at) = compaction else {
-            return Conversation::from_items(path.iter().filter_map(|record| item_of(record)));
-        };
-        let SessionEntry::Compaction(compaction) = &path[at].entry else {
-            return Conversation::new();
-        };
-        let mut items = vec![Item::Message(
-            Message::text(Role::User, compaction.summary.clone())
-                .with_meta(ItemMeta::new().with_injected(true)),
-        )];
-        if let Some(first) = &compaction.first_kept {
-            if let Some(from) = path[..at].iter().position(|record| &record.id == first) {
-                items.extend(path[from..at].iter().filter_map(|record| item_of(record)));
-            }
-        }
-        items.extend(path[at + 1..].iter().filter_map(|record| item_of(record)));
-        Conversation::from_items(items)
+            .rposition(|item| matches!(item, Item::Compaction(_)))
+            .unwrap_or(0);
+        Conversation::from_items(items.into_iter().skip(from))
     }
 
     /// The records of the user's messages on the path, in order: the points to roll back or

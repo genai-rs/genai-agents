@@ -1,8 +1,8 @@
 # Sessions
 
 A session keeps a conversation between runs: a user's chat, a ticket, a channel. It is an append-only log, not a list
-of items, so that nothing a run did is lost: a rollback, a fork or (later) a compaction changes what is sent to the
-model, never what is stored.
+of items, so that nothing a run did is lost: a rollback, a fork or a [compaction](context.md) changes what is sent
+to the model, never what is stored.
 
 ## A run on a session
 
@@ -46,14 +46,13 @@ Each `Record` has an id, the id of the record before it, an optional input key, 
 | `Item` | an item of the conversation |
 | `TurnSettings` | the model and its settings from here on |
 | `Usage` | what the server reported a response used |
-| `Compaction` | a summary that stands in for the conversation before it, and the first record it keeps |
 | `Label` | a name for this point, to roll back or fork to |
 | `Custom` | the application's own data, never sent to the model |
 | `Rollback` | nothing: the head moved back to its parent |
 | `Claim` | a writer opened the session |
 
 The records form a tree. The conversation is the path from the first record to the head (the latest record), from
-the latest compaction on: its summary first, as an injected user message, then the records it keeps, then the rest.
+the latest compaction (an `Item::Compaction`) on.
 
 - `rollback(Some(&id))` moves the head back to a record; `user_inputs()` lists the user's messages on the path, the
   usual places to go back to. The records after it stay in the log.
