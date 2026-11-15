@@ -10,6 +10,7 @@ that calls the model in a loop, runs the tools it asks for and sends their outpu
 | --- | --- |
 | [`genai-agents`](crates/genai-agents) | the runner, tools, the conversation and the `Model` trait, independent of the model provider |
 | [`genai-agents-openai`](crates/genai-agents-openai) | OpenAI's Responses API and Chat Completions as models, on [openai-ergonomic](https://github.com/genai-rs/openai-ergonomic) |
+| [`genai-agents-sqlite`](crates/genai-agents-sqlite) | sessions in SQLite |
 
 What works today:
 
@@ -18,12 +19,19 @@ What works today:
 - a runner that starts calls while the response streams, runs them concurrently where tools allow it, retries
   failed requests, stops after a number of requests or when cancelled, and keeps a history that can be sent again;
 - a provider-independent, serde-serializable conversation;
+- sessions: an append-only log with rollback, forks and guarded writes, in memory, JSON Lines files or SQLite;
+- tracing with OpenTelemetry's GenAI conventions, to Langfuse or any OpenTelemetry backend;
+- recorded runs, replayed in tests without a network;
 - natively and on WebAssembly.
 
-Sessions, tracing, agents with guardrails and handoffs, MCP and skills come next: see the [design](docs/design.md).
+Context management, agents with guardrails and handoffs, evals, MCP and skills come next: see the
+[design](docs/design.md).
 
 - [The runner](docs/runner.md)
 - [Tools](docs/tools.md)
+- [Sessions](docs/sessions.md)
+- [Tracing](docs/tracing.md)
+- [Recorded runs](docs/recording.md)
 
 ## License
 

@@ -164,6 +164,14 @@ pub struct RunConfig {
     /// The settings every request carries: the reasoning level, the output limit. Default: the
     /// provider's.
     pub model_settings: ModelSettings,
+    /// The agent's name in traces (`invoke_agent {name}`, `gen_ai.agent.name`). Default none.
+    pub name: Option<String>,
+    /// Whether the spans record the content: the messages of each request and response, and the
+    /// arguments and results of tool calls (`gen_ai.input.messages`, `gen_ai.output.messages`,
+    /// `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`). They can hold personal or
+    /// confidential data, so OpenTelemetry's GenAI conventions advise leaving them out unless
+    /// asked for. Default `false`.
+    pub trace_content: bool,
 }
 
 impl Default for RunConfig {
@@ -176,6 +184,8 @@ impl Default for RunConfig {
             retry: RetryConfig::default(),
             tool_search: Some(ToolSearchConfig::default()),
             model_settings: ModelSettings::default(),
+            name: None,
+            trace_content: false,
         }
     }
 }
@@ -233,6 +243,20 @@ impl RunConfig {
     #[must_use]
     pub fn with_model_settings(mut self, settings: ModelSettings) -> Self {
         self.model_settings = settings;
+        self
+    }
+
+    /// The agent's name in traces.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Whether the spans record the content of messages and tool calls.
+    #[must_use]
+    pub fn with_trace_content(mut self, trace_content: bool) -> Self {
+        self.trace_content = trace_content;
         self
     }
 }

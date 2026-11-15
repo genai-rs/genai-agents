@@ -35,6 +35,9 @@ pub enum Error {
     /// JSON that could not be encoded or decoded.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// A session could not be read or written.
+    #[error(transparent)]
+    Session(#[from] crate::session::SessionError),
 }
 
 impl From<ToolError> for Error {
@@ -76,7 +79,8 @@ impl Error {
 /// How a failed model request may be retried ([`ModelError::retry_class`]).
 ///
 /// New variants may be added in minor releases: match with a wildcard arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RetryClass {
     /// Retrying will not help: a client error, an exhausted quota, a context that is too long.
@@ -102,7 +106,8 @@ impl RetryClass {
 /// What kind of failure a [`ModelError`] is, for what to do about it beyond a retry.
 ///
 /// New variants may be added in minor releases: match with a wildcard arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ErrorKind {
     /// The request is too long for the model's context window.
@@ -122,6 +127,23 @@ pub enum ErrorKind {
     Local,
     /// Anything else, such as a request the provider rejected.
     Other,
+}
+
+impl ErrorKind {
+    /// Its name, in snake case: the `error.type` of the spans.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ContextOverflow => "context_overflow",
+            Self::ModelNotFound => "model_not_found",
+            Self::Authentication => "authentication",
+            Self::RateLimit => "rate_limit",
+            Self::Server => "server",
+            Self::Interrupted => "interrupted",
+            Self::Local => "local",
+            Self::Other => "other",
+        }
+    }
 }
 
 /// A model request that failed, with what a retry needs to know.

@@ -1,10 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/genai-agents", "crates/genai-agents-openai"]
+members = [
+    "crates/genai-agents",
+    "crates/genai-agents-openai",
+    "crates/genai-agents-sqlite",
+]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Tim Van Wassenhove <github@timvw.be>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/genai-rs/genai-agents"

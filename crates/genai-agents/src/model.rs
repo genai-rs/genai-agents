@@ -147,7 +147,8 @@ impl<'a> ModelRequest<'a> {
 /// A tool as the runner advertises it to the model.
 ///
 /// New variants may be added in minor releases: match with a wildcard arm.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ToolDefinition {
     /// A function tool: JSON arguments that match `parameters`.
@@ -240,7 +241,9 @@ impl ReasoningLevel {
 /// The settings of a request that every provider understands. A provider leaves out what its
 /// model does not take; settings of its own stay with the provider (such as a request
 /// template).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[non_exhaustive]
 pub struct ModelSettings {
     /// How hard the model reasons; `None` leaves it to the provider.
@@ -273,7 +276,10 @@ impl ModelSettings {
 
 /// Which call ids a model takes. The [projection](crate::Conversation::for_request) rewrites the
 /// others, the same way every time, in calls and their outputs alike.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CallIds {
     /// Any id (OpenAI).
@@ -346,7 +352,7 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// What the model is and can take, which changes what the runner sends it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 #[allow(clippy::struct_excessive_bools)] // independent capabilities
 pub struct ModelInfo {
@@ -482,7 +488,8 @@ impl ModelInfo {
 /// Something the model's response produced.
 ///
 /// New variants may be added in minor releases: match with a wildcard arm.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ModelEvent {
     /// Text the model is writing.
@@ -528,7 +535,8 @@ impl ModelEvent {
 /// Why the model stopped writing.
 ///
 /// New variants may be added in minor releases: match with a wildcard arm.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum StopReason {
     /// It answered.
@@ -546,7 +554,7 @@ pub enum StopReason {
 }
 
 /// The end of a response.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ModelResponse {
     /// The id the provider gave the response.
@@ -598,7 +606,9 @@ impl ModelResponse {
 }
 
 /// The tokens of a response.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[non_exhaustive]
 pub struct Usage {
     /// The input tokens, cached ones included.
@@ -649,7 +659,9 @@ impl Usage {
 }
 
 /// The rate limits a response reported (OpenAI's `x-ratelimit-*` headers).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[non_exhaustive]
 pub struct RateLimits {
     /// The requests window.
@@ -667,7 +679,9 @@ impl RateLimits {
 }
 
 /// One rate limit window.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[non_exhaustive]
 pub struct RateLimitWindow {
     /// The limit.
