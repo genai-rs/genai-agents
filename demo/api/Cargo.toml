@@ -1,0 +1,25 @@
+# Kept by hand (listed in .openapi-generator-ignore): the generator cannot say `publish = false` or inherit the
+# workspace's metadata yet. Its dependencies are the ones openapi-generator-timvw-rust renders for `targets: [server]`;
+# compare after regenerating with a new generator version.
+[package]
+name = "genai-agents-demo-api"
+version = "0.0.0"
+description = "The HTTP API of the genai-agents demo, generated from openapi.yaml by openapi-generator-timvw-rust"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+# Generated code: the workspace's lints are for code written by hand.
+
+[dependencies]
+bon = "^3"
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "^1.0"
+serde_repr = "^0.1"
+url = "^2.5"
+axum = { version = "^0.8", default-features = false }
+http = { version = "^1" }

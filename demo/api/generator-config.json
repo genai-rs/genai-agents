@@ -1,0 +1,6 @@
+{
+  "packageName": "genai-agents-demo-api",
+  "packageVersion": "0.1.0",
+  "targets": ["server"],
+  "repositoryUrl": "https://github.com/genai-rs/genai-agents"
+}

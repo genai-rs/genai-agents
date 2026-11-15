@@ -35,7 +35,7 @@ What works today:
 - natively and on WebAssembly (MCP natively only).
 
 The [design](docs/design.md) describes the whole and where it comes from. The [demo](demo/README.md) is a
-small assistant that puts most of it to work, with an eval.
+small assistant that puts most of it to work, with an eval, a chat page and a voice page on GPT-Live.
 
 - [The runner](docs/runner.md)
 - [Tools](docs/tools.md)
