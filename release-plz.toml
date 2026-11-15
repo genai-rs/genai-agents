@@ -46,3 +46,7 @@ publish_allow_dirty = false
 [[package]]
 name = "genai-agents-demo"
 release = false
+
+[[package]]
+name = "genai-agents-demo-api"
+release = false

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "demo",
+    "demo/api",
     "crates/genai-agents",
     "crates/genai-agents-eval",
     "crates/genai-agents-macros",

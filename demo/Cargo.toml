@@ -17,16 +17,19 @@ name = "genai-agents-demo"
 path = "src/main.rs"
 
 [dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 genai-agents = { path = "../crates/genai-agents", features = ["macros"] }
+genai-agents-demo-api = { path = "api" }
 genai-agents-eval = { path = "../crates/genai-agents-eval" }
 genai-agents-openai = { path = "../crates/genai-agents-openai" }
 genai-agents-sqlite = { path = "../crates/genai-agents-sqlite" }
+openai-client-base = { version = "0.34.1", default-features = false, features = ["rustls", "retry", "live"] }
 openai-ergonomic = { version = "0.24.1", default-features = false, features = ["rustls-tls", "otel"] }
 opentelemetry = "0.33.1"
 opentelemetry_sdk = { version = "0.33.1", features = ["rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
+tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread", "io-std", "io-util", "net", "signal", "sync"] }
 tracing = "0.1.41"
 tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["registry"] }

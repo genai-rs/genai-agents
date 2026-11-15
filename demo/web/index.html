@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Household assistant</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header>
+    <h1>Household assistant</h1>
+    <nav>
+      <a href="/" aria-current="page">Chat</a>
+      <a href="/voice">Voice</a>
+    </nav>
+    <span id="info"></span>
+  </header>
+  <main>
+    <div class="controls">
+      <span class="status">Session <strong id="session"></strong></span>
+      <button type="button" class="secondary" id="new-session">New session</button>
+    </div>
+    <p class="hint" id="empty">Ask about the household's notes, for example: “When are we painting the kitchen?” or
+      “Write a note that the plumber comes on Friday.” Writing a note waits for your approval.</p>
+    <div class="log" id="log" aria-live="polite"></div>
+    <form class="ask" id="ask">
+      <input type="text" id="question" autocomplete="off" placeholder="Ask a question" aria-label="Question" required>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </main>
+  <script src="/chat.js"></script>
+</body>
+</html>

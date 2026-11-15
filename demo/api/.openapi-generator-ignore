@@ -1,0 +1,5 @@
+# Files the generator does not write: ones the demo does not use, and the Cargo.toml kept by hand.
+.travis.yml
+git_push.sh
+.gitignore
+Cargo.toml

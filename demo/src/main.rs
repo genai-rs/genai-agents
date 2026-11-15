@@ -1,17 +1,21 @@
 //! A workspace assistant built on genai-agents: it answers questions about the files of a
 //! directory, keeps the conversation in a SQLite session, asks before it writes, traces to
-//! Langfuse, and has an eval of its own.
+//! Langfuse, and has an eval of its own. `serve` puts it on web pages: a chat, and a voice page
+//! on GPT-Live that hands the questions to the assistant.
 //!
 //! ```text
 //! genai-agents-demo ask "When are we painting the kitchen?"
 //! genai-agents-demo chat [session]
 //! genai-agents-demo eval [k] [--save-baseline]
+//! genai-agents-demo serve
 //! ```
 //!
 //! See the README for the environment variables.
 
+mod assistant;
 mod model;
 mod tools;
+mod web;
 
 use std::env;
 use std::io::Write as _;
@@ -19,31 +23,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use genai_agents::agent::Agent;
-use genai_agents::fallback::Fallback;
 use genai_agents::session::{Session, SessionId};
-use genai_agents::skills::instruction_files;
-use genai_agents::{AskFor, CancellationSignal, Conversation, Item, ModelEvent, RunEvent, RunStop};
+use genai_agents::{Conversation, RunStop};
 use genai_agents_eval::{
     scorer_fn, target_fn, Case, Dataset, Eval, MaxRequests, Report, Run, Score,
 };
-use genai_agents_sqlite::SqliteStore;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
-use tracing::Instrument as _;
 
+use crate::assistant::{assistant, print_events, store, turn, BoxError, Channel, Input};
 use crate::model::Tracing;
 use crate::tools::Workspace;
-
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
-
-const INSTRUCTIONS: &str = "You are the assistant of a household. You answer questions about the \
-household's notes, which are files in its workspace.
-
-Before you answer a question, ALWAYS look it up with the tools: call `search` with a few plain \
-words from the question (such as `paint kitchen`), then `read_file` on the file it points to. \
-If a search finds nothing, try other words or call `list_files` and read the notes. Never answer \
-from memory and never say the information is missing before you have searched and read the \
-notes. Write a note only when you are asked to.";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -83,6 +72,14 @@ async fn run() -> Result<ExitCode, BoxError> {
             let save = args.iter().any(|arg| arg == "--save-baseline");
             eval(&workspace, k, save).await?
         }
+        Some("serve") => {
+            let tracing = Arc::new(tracing);
+            web::serve(workspace, Arc::clone(&tracing)).await?;
+            if let Ok(tracing) = Arc::try_unwrap(tracing) {
+                tracing.shutdown();
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
         _ => usage(),
     };
     tracing.shutdown();
@@ -92,33 +89,9 @@ async fn run() -> Result<ExitCode, BoxError> {
 fn usage() -> ExitCode {
     eprintln!(
         "usage: genai-agents-demo ask <question>\n       genai-agents-demo chat [session]\n       \
-         genai-agents-demo eval [k] [--save-baseline]"
+         genai-agents-demo eval [k] [--save-baseline]\n       genai-agents-demo serve"
     );
     ExitCode::FAILURE
-}
-
-/// The assistant: the model, the workspace's tools, its AGENTS.md, and approvals for writes.
-fn assistant(workspace: &Workspace) -> Result<(Agent<Fallback>, String), BoxError> {
-    let (model, label) = model::from_env()?;
-    let mut instructions = INSTRUCTIONS.to_owned();
-    let agents_md = instruction_files(workspace.root(), workspace.root(), 4_000)?;
-    if !agents_md.is_empty() {
-        instructions.push_str("\n\n");
-        instructions.push_str(&agents_md);
-    }
-    let agent = Agent::new("household-assistant", model)
-        .description("Answers questions about the household's notes.")
-        .with_tools(tools::registry(workspace)?)
-        .instructions(instructions)
-        .approvals(AskFor::tools(["write_note"]));
-    Ok((agent, label))
-}
-
-/// The sessions of a workspace, in `<workspace>/.demo/sessions.db`.
-async fn store(workspace: &Workspace) -> Result<SqliteStore, BoxError> {
-    let dir = workspace.root().join(".demo");
-    std::fs::create_dir_all(&dir)?;
-    Ok(SqliteStore::open(dir.join("sessions.db")).await?)
 }
 
 /// Answer one question, in the session `session`.
@@ -128,16 +101,16 @@ async fn ask(
     session: &str,
     question: &str,
 ) -> Result<(), BoxError> {
-    let (mut agent, label) = assistant(workspace)?;
+    let (mut agent, label) = assistant(workspace, Channel::Text)?;
     eprintln!("[{label}]");
     let store = store(workspace).await?;
     let mut session = Session::open(&store, SessionId::new(session)).await?;
-    turn(&mut agent, &mut session, tracing, question).await
+    terminal_turn(&mut agent, &mut session, tracing, question).await
 }
 
 /// A conversation on the terminal, one question per line, until an empty line.
 async fn chat(workspace: &Workspace, tracing: &Tracing, session: &str) -> Result<(), BoxError> {
-    let (mut agent, label) = assistant(workspace)?;
+    let (mut agent, label) = assistant(workspace, Channel::Text)?;
     let store = store(workspace).await?;
     let mut session = Session::open(&store, SessionId::new(session)).await?;
     eprintln!(
@@ -155,15 +128,15 @@ async fn chat(workspace: &Workspace, tracing: &Tracing, session: &str) -> Result
         if line.trim().is_empty() {
             break;
         }
-        turn(&mut agent, &mut session, tracing, line.trim()).await?;
+        terminal_turn(&mut agent, &mut session, tracing, line.trim()).await?;
     }
     Ok(())
 }
 
-/// One question: the run, its approvals, and the answer printed as it comes.
-async fn turn(
-    agent: &mut Agent<Fallback>,
-    session: &mut Session<&SqliteStore>,
+/// One question on the terminal: the run, its approvals asked on the terminal, and the answer.
+async fn terminal_turn(
+    agent: &mut genai_agents::agent::Agent<genai_agents::fallback::Fallback>,
+    session: &mut Session<&genai_agents_sqlite::SqliteStore>,
     tracing: &Tracing,
     question: &str,
 ) -> Result<(), BoxError> {
@@ -173,17 +146,16 @@ async fn turn(
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos()
     );
-    session.append_input(key, Item::user(question)).await?;
-    let span = tracing::info_span!("question", question);
-    let cancel = CancellationSignal::new();
-    let mut outcome = agent
-        .run_session(&(), session, &cancel, print_events)
-        .instrument(span.clone())
-        .await?;
+    let input = Input::Question {
+        key,
+        text: question,
+    };
+    let mut report = turn(agent, session, tracing, input, print_events).await?;
+    let (mut requests, mut tokens) = (report.requests, report.tokens);
     // Ask on the terminal for every call that needs it, until the run goes through.
-    while let RunStop::Approval { pending } = &outcome.run.stop {
+    while !report.pending().is_empty() {
         let mut decisions = Vec::new();
-        for call in pending {
+        for call in report.pending() {
             eprint!("\nRun {}({})? [y/N] ", call.name, call.arguments);
             std::io::stderr().flush()?;
             let mut answer = String::new();
@@ -196,48 +168,26 @@ async fn turn(
                 call.deny("the user said no")
             });
         }
-        outcome = agent
-            .resume_session(&(), session, &decisions, &cancel, print_events)
-            .instrument(span.clone())
-            .await?;
+        report = turn(
+            agent,
+            session,
+            tracing,
+            Input::Decisions(&decisions),
+            print_events,
+        )
+        .await?;
+        requests += report.requests;
+        tokens += report.tokens;
     }
-    match (&outcome.run.stop, outcome.output()) {
+    match (&report.stop, &report.answer) {
         (RunStop::Completed, Some(answer)) => println!("\n{answer}"),
         (stop, _) => println!("\n[the run stopped: {stop:?}]"),
     }
-    let usage = outcome
-        .run
-        .turns
-        .iter()
-        .filter_map(|turn| turn.usage)
-        .fold(0, |total, usage| {
-            total + usage.input_tokens + usage.output_tokens
-        });
-    if tracing.enabled() {
-        eprintln!(
-            "[{} requests, {usage} tokens; trace {}]",
-            outcome.run.turns.len(),
-            Tracing::trace_id(&span)
-        );
-    } else {
-        eprintln!("[{} requests, {usage} tokens]", outcome.run.turns.len());
+    match &report.trace_id {
+        Some(trace) => eprintln!("[{requests} requests, {tokens} tokens; trace {trace}]"),
+        None => eprintln!("[{requests} requests, {tokens} tokens]"),
     }
     Ok(())
-}
-
-/// Show the run as it goes: the calls on stderr.
-fn print_events(event: RunEvent<'_>) {
-    match event {
-        RunEvent::ToolCalled(call) => eprintln!("  → {}({})", call.name, call.input),
-        RunEvent::Retrying { attempt, error, .. } => eprintln!("  ↻ retry {attempt}: {error}"),
-        RunEvent::Compacted {
-            tokens_before,
-            tokens_after,
-        } => {
-            eprintln!("  ⇢ compacted {tokens_before} → {tokens_after} tokens");
-        }
-        RunEvent::Model(ModelEvent::TextDelta(_)) | _ => {}
-    }
 }
 
 /// The eval: every case of `evals/cases.jsonl`, `k` times, on a fresh assistant each time.
@@ -247,7 +197,7 @@ async fn eval(workspace: &Workspace, k: u32, save_baseline: bool) -> Result<Exit
     let target = target_fn(move |case: Case| {
         let workspace = Arc::clone(&shared);
         async move {
-            let (mut agent, _) = assistant(&workspace)
+            let (mut agent, _) = assistant(&workspace, Channel::Text)
                 .map_err(|error| genai_agents::Error::Output(error.to_string()))?;
             let mut conversation: Conversation = case.input;
             let outcome = agent.run(&(), &mut conversation).await?;
@@ -272,6 +222,10 @@ async fn eval(workspace: &Workspace, k: u32, save_baseline: bool) -> Result<Exit
             .collect();
         let wanted = case.metadata["tool"].as_str().unwrap_or_default();
         let ok = match wanted {
+            // Any way of looking at the workspace: `search` also lists file names.
+            "any" => calls
+                .iter()
+                .any(|name| matches!(name.as_str(), "search" | "read_file" | "list_files")),
             "search_or_read" => calls
                 .iter()
                 .any(|name| name == "search" || name == "read_file"),
