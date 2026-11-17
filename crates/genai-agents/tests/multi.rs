@@ -12,8 +12,8 @@ use genai_agents::session::{MemoryStore, Session, SessionId};
 use genai_agents::testing::{Reply, ScriptedModel, SeenRequest};
 use genai_agents::tools::{FunctionTool, ToolRegistry};
 use genai_agents::{
-    AskFor, CancellationSignal, Conversation, Error, Item, PendingCall, Result, RunStop, Runner,
-    ToolCall, ToolPolicy,
+    AskFor, CancellationSignal, Conversation, Error, Item, PendingCall, Result, RunEvent, RunStop,
+    Runner, ToolCall, ToolPolicy,
 };
 use serde_json::{json, Value};
 
@@ -132,6 +132,41 @@ async fn a_run_stops_for_approval_and_resumes() {
     let last = model.requests().pop().unwrap();
     assert_eq!(output_of(&last, "c1"), "\"read_file done\"");
     assert_eq!(output_of(&last, "c2"), "\"delete_file done\"");
+}
+
+#[tokio::test]
+async fn resume_reports_the_answers_of_the_decided_calls() {
+    let (tools, _, deletes) = files();
+    let model = ScriptedModel::new(|index, _| match index {
+        0 => calls(&[
+            ("c1", "delete_file", json!({"path": "a"})),
+            ("c2", "delete_file", json!({"path": "b"})),
+        ]),
+        _ => Reply::text("Deleted a, kept b."),
+    });
+    let mut runner = Runner::new(model, tools).with_approvals(AskFor::tools(["delete_*"]));
+    let mut conversation = Conversation::user("Delete a and b");
+    let waiting = pending(&runner.run(&mut conversation).await.unwrap().stop);
+    let mut answered = Vec::new();
+    runner
+        .resume(
+            &mut conversation,
+            &[waiting[0].approve(), waiting[1].deny("keep b")],
+            &CancellationSignal::new(),
+            |event| {
+                if let RunEvent::ToolAnswered(answer) = event {
+                    answered.push((answer.call_id.clone(), answer.success));
+                }
+            },
+        )
+        .await
+        .unwrap();
+    answered.sort();
+    assert_eq!(
+        answered,
+        [("c1".to_owned(), true), ("c2".to_owned(), false)]
+    );
+    assert_eq!(deletes.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

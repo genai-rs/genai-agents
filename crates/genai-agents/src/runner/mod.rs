@@ -502,7 +502,8 @@ impl<M: Model> Runner<M> {
 
     /// Resume a run that stopped for approvals ([`RunStop::Approval`]) with the decisions:
     /// the approved calls run, the denied ones are answered with the reason, and the run goes on
-    /// as [`run_with`](Self::run_with) does. An abort answers every pending call `"aborted"` and
+    /// as [`run_with`](Self::run_with) does. `on_event` sees the decided calls' answers
+    /// ([`RunEvent::ToolAnswered`]) first. An abort answers every pending call `"aborted"` and
     /// ends the run ([`RunStop::Cancelled`]). A pending call without a decision is left
     /// unanswered (the next request answers it `"aborted"`).
     ///
@@ -515,13 +516,13 @@ impl<M: Model> Runner<M> {
         conversation: &mut Conversation,
         approvals: &[Approval],
         cancel: &CancellationSignal,
-        on_event: F,
+        mut on_event: F,
     ) -> Result<RunOutcome>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
     {
         if self
-            .apply(conversation, approvals, cancel, &NoHooks)
+            .apply(conversation, approvals, cancel, &NoHooks, &mut on_event)
             .await?
         {
             return Ok(RunOutcome::new(RunStop::Cancelled, Vec::new()));
@@ -529,15 +530,19 @@ impl<M: Model> Runner<M> {
         self.run_with(conversation, cancel, on_event).await
     }
 
-    /// Apply approval decisions: run the approved calls, answer the denied ones. Returns whether
-    /// the run was aborted.
-    pub(crate) async fn apply(
+    /// Apply approval decisions: run the approved calls, answer the denied ones, and tell
+    /// `on_event` each answer. Returns whether the run was aborted.
+    pub(crate) async fn apply<F>(
         &mut self,
         conversation: &mut Conversation,
         approvals: &[Approval],
         cancel: &CancellationSignal,
         hooks: &dyn RunHooks,
-    ) -> Result<bool> {
+        on_event: &mut F,
+    ) -> Result<bool>
+    where
+        F: FnMut(RunEvent<'_>) + MaybeSend,
+    {
         let waiting = conversation.unanswered_calls();
         let mut chosen = Vec::new();
         for approval in approvals {
@@ -560,7 +565,9 @@ impl<M: Model> Runner<M> {
             .any(|(_, decision)| matches!(decision, Decision::Abort))
         {
             for (call, _) in &chosen {
-                conversation.push_output(&ToolOutput::aborted(call));
+                let answer = ToolOutput::aborted(call);
+                on_event(RunEvent::ToolAnswered(&answer));
+                conversation.push_output(&answer);
             }
             return Ok(true);
         }
@@ -577,6 +584,7 @@ impl<M: Model> Runner<M> {
             match decision {
                 Decision::Deny(reason) => {
                     let answer = ToolOutput::failure(&call, format!("denied: {reason}"));
+                    on_event(RunEvent::ToolAnswered(&answer));
                     dispatcher.push_answered(call, answer);
                 }
                 Decision::ApproveForSession => {
@@ -593,7 +601,7 @@ impl<M: Model> Runner<M> {
                 conversation,
                 &mut dispatcher,
                 cancel,
-                &mut |_| {},
+                on_event,
                 &NoBackground,
             )
             .await?

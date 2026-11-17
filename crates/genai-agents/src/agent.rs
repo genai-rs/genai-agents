@@ -752,7 +752,7 @@ impl<M: Model, C: MaybeSync, O> Agent<M, C, O> {
         conversation: &mut Conversation,
         approvals: &[crate::runner::Approval],
         cancel: &CancellationSignal,
-        on_event: F,
+        mut on_event: F,
     ) -> Result<AgentOutcome<O>>
     where
         F: FnMut(RunEvent<'_>) + MaybeSend,
@@ -763,7 +763,7 @@ impl<M: Model, C: MaybeSync, O> Agent<M, C, O> {
         };
         if self
             .runner
-            .apply(conversation, approvals, cancel, &hooks)
+            .apply(conversation, approvals, cancel, &hooks, &mut on_event)
             .await?
         {
             return Ok(AgentOutcome {
@@ -796,7 +796,7 @@ impl<M: Model, C: MaybeSync, O> Agent<M, C, O> {
         session: &mut Session<S>,
         approvals: &[crate::runner::Approval],
         cancel: &CancellationSignal,
-        on_event: F,
+        mut on_event: F,
     ) -> Result<AgentOutcome<O>>
     where
         S: SessionStore,
@@ -814,7 +814,7 @@ impl<M: Model, C: MaybeSync, O> Agent<M, C, O> {
         };
         let aborted = self
             .runner
-            .apply(&mut conversation, approvals, cancel, &hooks)
+            .apply(&mut conversation, approvals, cancel, &hooks, &mut on_event)
             .await?;
         if aborted {
             let settings = self.runner.turn_settings();
