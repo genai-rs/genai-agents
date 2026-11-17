@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.3.0...genai-agents-v0.3.1) - 2026-11-17
+
+### Fixed
+
+- *(runner)* resume tells on_event the answers of the decided calls
+
 ## [0.3.0](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.2.0...genai-agents-v0.3.0) - 2026-11-15
 
 ### Added
