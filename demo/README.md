@@ -74,6 +74,10 @@ assistant made as a card that opens into its input, output and duration.
   (`POST /api/live/delegations`, with the transcript so far) and gives GPT-Live the answer to say
   (`session.commentary.append`). Notes are not written by voice: the assistant hears that the chat does that.
 
+GPT-Live greets you out loud when the call starts, so you hear at once that the sound works. A question you type
+during a call is answered by the assistant and said by GPT-Live (`session.commentary.append`). Outside a call, the
+speaker button in the header has the browser read the answers aloud (its own speech synthesis).
+
 The settings (the gear) pick GPT-Live's voice and start a new session.
 
 The OpenAI key stays on the server: it creates the Live session for the browser's WebRTC offer
