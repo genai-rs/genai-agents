@@ -130,6 +130,25 @@ svg {
   height: 22px;
 }
 
+.speak .on,
+.speak[aria-pressed="true"] .off {
+  display: none;
+}
+
+.speak[aria-pressed="true"] .on {
+  display: block;
+}
+
+.speak[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.status button {
+  margin-left: 6px;
+  padding: 2px 10px;
+  font-size: 0.8rem;
+}
+
 .theme-switch {
   position: relative;
   width: 46px;
@@ -319,6 +338,17 @@ svg {
 
 .assistant .bubble {
   border-top-left-radius: 4px;
+}
+
+.bubble.spoken::before {
+  content: "GPT-Live";
+  display: block;
+  margin-bottom: 2px;
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .bubble.pending {

@@ -216,6 +216,41 @@ function showInput(show) {
 showInput(stored("demo-input") !== "hidden");
 keyboard.addEventListener("click", () => showInput(form.hidden));
 
+// ---- Answers out loud ---------------------------------------------------------------------------
+//
+// In a call, GPT-Live says the answers to typed questions too. Outside a call, the speaker button
+// has the browser read them (its own speech synthesis: no request leaves the browser).
+
+const speakButton = $("speak");
+const synthesis = "speechSynthesis" in window ? window.speechSynthesis : null;
+let speaking = stored("demo-speak") === "on";
+
+function showSpeaking() {
+  speakButton.setAttribute("aria-pressed", String(speaking));
+  speakButton.title = speaking ? "Answers are read aloud" : "Read answers aloud";
+}
+
+showSpeaking();
+speakButton.addEventListener("click", () => {
+  speaking = !speaking;
+  store("demo-speak", speaking ? "on" : "off");
+  if (!speaking && synthesis) synthesis.cancel();
+  showSpeaking();
+});
+
+function speak(text) {
+  if (!text.trim()) return;
+  if (call && call.started) {
+    call.say("The caller typed a question, and the household's assistant answered it: " + text +
+      "\nTell the caller this answer briefly, in your own words.");
+  } else if (speaking && synthesis) {
+    synthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = document.documentElement.lang;
+    synthesis.speak(utterance);
+  }
+}
+
 // ---- The chat ----------------------------------------------------------------------------------
 
 function newSessionId() {
@@ -244,6 +279,7 @@ function showTurn(turn) {
   const cost = `${turn.requests} requests, ${turn.tokens} tokens`;
   if (turn.status === "answered") {
     addMeta(addMessage("assistant", turn.answer || "").parentElement, turn, cost);
+    speak(turn.answer || "");
   } else if (turn.status === "approval") {
     const card = element("div", "approval");
     card.append(element("p", "", "The assistant wants to run:"));
@@ -293,6 +329,7 @@ form.addEventListener("submit", (event) => {
   if (!text) return;
   question.value = "";
   addMessage("user", text);
+  if (call && call.started) call.transcript.note("user", text);
   run(() => api("POST", `/api/sessions/${session}/messages`, { text }));
 });
 
@@ -438,17 +475,26 @@ class Transcript {
   }
 
   // A transcript delta of `role`: it continues that role's last message, or starts a new one when
-  // the other side spoke in between.
+  // the other side spoke, or anything else came into the conversation, in between.
   add(role, delta) {
     const last = this.messages[this.messages.length - 1];
-    if (last && last.role === role) {
+    const bubble = this.bubbles[this.bubbles.length - 1];
+    if (last && last.role === role && bubble && bubble.parentElement === log.lastElementChild) {
       last.text += delta;
-      this.bubbles[this.bubbles.length - 1].textContent = last.text;
+      bubble.textContent = last.text;
       scrollDown();
     } else {
       this.messages.push({ role, text: delta });
-      this.bubbles.push(addMessage(role, delta));
+      const node = addMessage(role, delta, role === "assistant" ? "spoken" : "");
+      node.title = role === "assistant" ? "Said by GPT-Live" : "What GPT-Live heard";
+      this.bubbles.push(node);
     }
+  }
+
+  // A message typed during the call: part of what the assistant hears when GPT-Live delegates.
+  note(role, text) {
+    this.messages.push({ role, text });
+    this.bubbles.push(null);
   }
 
   recent() {
@@ -502,8 +548,12 @@ class Call {
     stage.mic = this.analyser(this.mic);
     this.pc = new RTCPeerConnection();
     this.pc.addEventListener("track", (event) => {
-      $("speaker").srcObject = event.streams[0];
-      stage.speaker = this.analyser(event.streams[0]);
+      const stream = event.streams[0];
+      const speaker = $("speaker");
+      speaker.srcObject = stream;
+      speaker.play().catch(() => this.soundBlocked());
+      // The ring listens to a copy of the track: the audio element plays the original.
+      stage.speaker = this.analyser(new MediaStream(stream.getAudioTracks().map((track) => track.clone())));
     });
     for (const track of this.mic.getAudioTracks()) this.pc.addTrack(track, this.mic);
     this.channel = this.pc.createDataChannel("oai-events");
@@ -532,12 +582,30 @@ class Call {
     if (this.channel && this.channel.readyState === "open") this.channel.send(JSON.stringify(event));
   }
 
+  // Something for GPT-Live to say: context it communicates (at most 500 tokens), outside a delegation.
+  say(content) {
+    this.send({ type: "session.commentary.append", delegation_id: null, content: content.slice(0, 1500) });
+  }
+
+  // The browser did not let the page play GPT-Live's voice: a tap does.
+  soundBlocked() {
+    const button = element("button", "primary", "Turn on the sound");
+    button.type = "button";
+    button.addEventListener("click", () => {
+      $("speaker").play().then(() => button.remove(), () => {});
+    });
+    status.textContent = "The browser muted the voice: ";
+    status.append(button);
+  }
+
   receive(event) {
     switch (event.type) {
       case "session.started":
         this.started = true;
         setOrb("live", "Hang up", "Listening: speak");
         stage.start();
+        // A greeting out loud: the caller hears at once that the sound works.
+        this.say("The call just started. Greet the caller in one short sentence and offer help with the household.");
         break;
       case "session.input_transcript.delta":
         this.transcript.add("user", event.delta);
