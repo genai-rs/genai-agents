@@ -5,6 +5,8 @@ use genai_agents::fallback::Fallback;
 use genai_agents::runner::{Approval, PendingCall};
 use genai_agents::session::Session;
 use genai_agents::skills::instruction_files;
+use std::time::Instant;
+
 use genai_agents::{AskFor, CancellationSignal, Item, ModelEvent, Role, RunEvent, RunStop};
 use genai_agents_sqlite::SqliteStore;
 use tracing::Instrument as _;
@@ -78,8 +80,8 @@ pub enum Input<'a> {
 pub struct TurnReport {
     pub stop: RunStop,
     pub answer: Option<String>,
-    /// The tools called, with their arguments, in order.
-    pub calls: Vec<(String, String)>,
+    /// The tools called, in order, with what they answered.
+    pub calls: Vec<CallReport>,
     pub requests: usize,
     pub tokens: i64,
     /// The Langfuse trace, when tracing is on.
@@ -96,18 +98,116 @@ impl TurnReport {
     }
 }
 
+/// A tool call of a run, for the pages: what the model asked and what the tool answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallReport {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+    /// The tool's answer, shortened to [`CallLog::MAX_OUTPUT`] characters; `None` while the
+    /// call waits for approval.
+    pub output: Option<String>,
+    pub ok: Option<bool>,
+    /// From the call to its answer, in milliseconds (calls answered in the run they were made in).
+    pub duration_ms: Option<u64>,
+}
+
+/// The calls of a run, from its events.
+#[derive(Debug, Default)]
+pub struct CallLog {
+    calls: Vec<CallReport>,
+    started: Vec<(String, Instant)>,
+}
+
+impl CallLog {
+    /// The most characters of a tool's answer a page gets.
+    pub const MAX_OUTPUT: usize = 4_000;
+
+    pub fn observe(&mut self, event: &RunEvent<'_>) {
+        match event {
+            RunEvent::ToolCalled(call) => {
+                self.started.push((call.call_id.clone(), Instant::now()));
+                self.calls.push(CallReport {
+                    call_id: call.call_id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.input.clone(),
+                    output: None,
+                    ok: None,
+                    duration_ms: None,
+                });
+            }
+            RunEvent::ToolAnswered(answer) => {
+                let duration_ms = self
+                    .started
+                    .iter()
+                    .find(|(id, _)| *id == answer.call_id)
+                    .map(|(_, at)| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX));
+                let output = answer.body.to_text().unwrap_or_else(|| "(not text)".into());
+                let output = shorten(&output, Self::MAX_OUTPUT);
+                let index = match self.calls.iter().position(|c| c.call_id == answer.call_id) {
+                    Some(index) => index,
+                    // A call made in an earlier run: one that waited for approval.
+                    None => {
+                        self.calls.push(CallReport {
+                            call_id: answer.call_id.clone(),
+                            name: String::new(),
+                            arguments: String::new(),
+                            output: None,
+                            ok: None,
+                            duration_ms: None,
+                        });
+                        self.calls.len() - 1
+                    }
+                };
+                let call = &mut self.calls[index];
+                call.output = Some(output);
+                call.ok = Some(answer.success);
+                call.duration_ms = duration_ms;
+            }
+            _ => {}
+        }
+    }
+
+    /// The calls, with the names and arguments of calls made in an earlier run taken from the
+    /// conversation.
+    pub fn finish(mut self, items: &[Item]) -> Vec<CallReport> {
+        for call in self.calls.iter_mut().filter(|c| c.name.is_empty()) {
+            if let Some(made) = items.iter().find_map(|item| match item {
+                Item::ToolCall(made) if made.call_id == call.call_id => Some(made),
+                _ => None,
+            }) {
+                call.name = made.name.clone();
+                call.arguments = made.input.clone();
+            }
+        }
+        self.calls
+    }
+}
+
+fn shorten(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
+    }
+}
+
 /// Run a turn of the assistant in a session, up to its answer or the approvals it waits for.
 pub async fn turn<F>(
     agent: &mut Agent<Fallback>,
     session: &mut Session<&SqliteStore>,
     tracing: &Tracing,
     input: Input<'_>,
-    on_event: F,
+    mut on_event: F,
 ) -> Result<TurnReport, BoxError>
 where
     F: FnMut(RunEvent<'_>) + Send,
 {
     let cancel = CancellationSignal::new();
+    let mut log = CallLog::default();
+    let on_event = |event: RunEvent<'_>| {
+        log.observe(&event);
+        on_event(event);
+    };
     let outcome = match input {
         Input::Question { key, text } => {
             session.append_input(key, Item::user(text)).await?;
@@ -128,13 +228,7 @@ where
         }
     };
     let (outcome, span) = outcome;
-    let calls = outcome
-        .run
-        .turns
-        .iter()
-        .flat_map(|turn| turn.calls.iter())
-        .map(|call| (call.name.clone(), call.input.clone()))
-        .collect();
+    let calls = log.finish(session.conversation().items());
     let tokens = outcome
         .run
         .turns

@@ -275,12 +275,25 @@ components:
           description: The trace in the Langfuse UI, when its project is known.
     Call:
       type: object
+      description: A tool call of the assistant, and what the tool answered.
       required: [name, arguments]
       properties:
         name:
           type: string
         arguments:
           type: string
+          description: The JSON arguments the model gave.
+        output:
+          type: string
+          description: The tool's answer, shortened to 4000 characters; absent while the call waits for approval.
+        ok:
+          type: boolean
+          description: Whether the tool succeeded; absent while the call waits for approval.
+        duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: From the call to its answer, in milliseconds; absent for a call approved in an earlier turn.
     LiveSessionRequest:
       type: object
       required: [sdp]
