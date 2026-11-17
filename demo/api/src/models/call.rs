@@ -10,25 +10,48 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Call : A tool call of the assistant, and what the tool answered.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, bon::Builder)]
 pub struct Call {
     #[serde(rename = "name")]
     pub name: String,
+    /// The JSON arguments the model gave.
     #[serde(rename = "arguments")]
     pub arguments: String,
+    /// The tool's answer, shortened to 4000 characters; absent while the call waits for approval.
+    #[serde(rename = "output", skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Whether the tool succeeded; absent while the call waits for approval.
+    #[serde(rename = "ok", skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    /// From the call to its answer, in milliseconds; absent for a call approved in an earlier turn.
+    ///
+    /// Validation: `minimum: 0`.
+    #[serde(rename = "duration_ms", skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
 }
 
 impl Call {
+    /// A tool call of the assistant, and what the tool answered.
     pub fn new(name: String, arguments: String) -> Call {
-        Call { name, arguments }
+        Call {
+            name,
+            arguments,
+            output: None,
+            ok: None,
+            duration_ms: None,
+        }
     }
 }
 
 impl crate::models::validation::Validate for Call {
     fn validate_into(
         &self,
-        _path: &crate::models::validation::Path<'_>,
-        _errors: &mut Vec<crate::models::validation::ValidationError>,
+        path: &crate::models::validation::Path<'_>,
+        errors: &mut Vec<crate::models::validation::ValidationError>,
     ) {
+        if let Some(value0) = &self.duration_ms {
+            crate::models::validation::minimum(*value0, 0, &path.field("duration_ms"), errors);
+        }
     }
 }

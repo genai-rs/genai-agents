@@ -1,7 +1,9 @@
 //! `serve`: the web pages, on the server generated from `demo/api/openapi.yaml`.
 //!
-//! - `/`: a chat with the assistant, in a session, with buttons for the calls that need approval.
-//! - `/voice`: a call with GPT-Live in the browser (WebRTC). GPT-Live hands the questions it
+//! `/` is one conversation with the assistant, typed or spoken, with the tool calls it made:
+//!
+//! - Typed: a chat in a session, with buttons for the calls that need approval.
+//! - Spoken: a call with GPT-Live in the browser (WebRTC). GPT-Live hands the questions it
 //!   should not answer itself to the application (client delegation); the page sends them to
 //!   `/api/live/delegations`, where the assistant answers them, and gives GPT-Live the answer to
 //!   say (`session.commentary.append`).
@@ -35,7 +37,9 @@ use openai_client_base::models as openai;
 use tokio::sync::Mutex;
 use tracing::Instrument as _;
 
-use crate::assistant::{self, assistant, store, transcript, BoxError, Channel, Input, TurnReport};
+use crate::assistant::{
+    self, assistant, store, transcript, BoxError, CallLog, CallReport, Channel, Input, TurnReport,
+};
 use crate::model::Tracing;
 use crate::tools::Workspace;
 
@@ -50,8 +54,9 @@ Delegate every question about the household to the backend, and every request to
 note. Never guess an answer about the household; wait for the backend's result before you say \
 a date, an amount or a name. Small talk and questions about how you work need no backend.";
 
-/// The pages, built into the binary.
-const PAGES: [(&str, &str, &str); 5] = [
+/// The page, built into the binary. `/voice` is the same page: the voice and the chat are one
+/// conversation now, and old links keep working.
+const PAGES: [(&str, &str, &str); 4] = [
     (
         "/",
         "text/html; charset=utf-8",
@@ -60,7 +65,7 @@ const PAGES: [(&str, &str, &str); 5] = [
     (
         "/voice",
         "text/html; charset=utf-8",
-        include_str!("../web/voice.html"),
+        include_str!("../web/index.html"),
     ),
     (
         "/app.css",
@@ -68,14 +73,9 @@ const PAGES: [(&str, &str, &str); 5] = [
         include_str!("../web/app.css"),
     ),
     (
-        "/chat.js",
+        "/app.js",
         "text/javascript; charset=utf-8",
-        include_str!("../web/chat.js"),
-    ),
-    (
-        "/voice.js",
-        "text/javascript; charset=utf-8",
-        include_str!("../web/voice.js"),
+        include_str!("../web/app.js"),
     ),
 ];
 
@@ -104,7 +104,7 @@ pub async fn serve(workspace: Workspace, tracing: Arc<Tracing>) -> Result<(), Bo
         );
     }
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    eprintln!("[serving http://{addr}: the chat at /, the voice page at /voice; Ctrl-C stops]");
+    eprintln!("[serving http://{addr}: the page at /; Ctrl-C stops]");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -215,30 +215,31 @@ impl Server {
         }
         let span = tracing::info_span!("delegation", delegation_id);
         let cancel = CancellationSignal::new();
+        let mut log = CallLog::default();
         let mut outcome = agent
-            .run_with(&(), &mut conversation, &cancel, |_| {})
+            .run_with(&(), &mut conversation, &cancel, |event| log.observe(&event))
             .instrument(span.clone())
             .await?;
-        let mut turns = std::mem::take(&mut outcome.run.turns);
         if let RunStop::Approval { pending } = &outcome.run.stop {
             let denied: Vec<Approval> = pending
                 .iter()
                 .map(|call| call.deny("notes are written on the chat page, not by voice"))
                 .collect();
             outcome = agent
-                .resume(&(), &mut conversation, &denied, &cancel, |_| {})
+                .resume(&(), &mut conversation, &denied, &cancel, |event| {
+                    log.observe(&event)
+                })
                 .instrument(span.clone())
                 .await?;
-            turns.append(&mut outcome.run.turns);
         }
         let answer = match (&outcome.run.stop, outcome.output()) {
             (RunStop::Completed, Some(answer)) => answer.clone(),
             (stop, _) => format!("The assistant could not answer ({stop:?})."),
         };
-        let calls = turns
+        let calls = log
+            .finish(conversation.items())
             .iter()
-            .flat_map(|turn| turn.calls.iter())
-            .map(|call| models::Call::new(call.name.clone(), call.input.clone()))
+            .map(call_model)
             .collect();
         let mut result = models::DelegationResult::new(answer, calls);
         if self.tracing.enabled() {
@@ -251,11 +252,17 @@ impl Server {
 }
 
 fn calls(report: &TurnReport) -> Vec<models::Call> {
-    report
-        .calls
-        .iter()
-        .map(|(name, arguments)| models::Call::new(name.clone(), arguments.clone()))
-        .collect()
+    report.calls.iter().map(call_model).collect()
+}
+
+fn call_model(call: &CallReport) -> models::Call {
+    let mut model = models::Call::new(call.name.clone(), call.arguments.clone());
+    model.output = call.output.clone();
+    model.ok = call.ok;
+    model.duration_ms = call
+        .duration_ms
+        .map(|ms| i64::try_from(ms).unwrap_or(i64::MAX));
+    model
 }
 
 /// A pending call for the page. Both sides serialize the same fields; the page sends it back
