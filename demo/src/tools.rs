@@ -44,11 +44,16 @@ impl Workspace {
         }
     }
 
+    /// A path as the model sees it: relative, with `/` on every platform.
     fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root)
-            .unwrap_or(path)
-            .display()
-            .to_string()
+        match path.strip_prefix(&self.root) {
+            Ok(relative) => relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+            Err(_) => path.display().to_string(),
+        }
     }
 
     /// Every file of the workspace, relative, sorted; hidden ones left out.
