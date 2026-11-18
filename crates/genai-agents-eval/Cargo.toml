@@ -1,6 +1,6 @@
 [package]
 name = "genai-agents-eval"
-version = "0.1.1"
+version = "0.2.0"
 description = "Evals for genai-agents: datasets, scorers, repeated runs, reports with a baseline, Langfuse dataset runs"
 documentation = "https://docs.rs/genai-agents-eval"
 readme = "README.md"
@@ -26,7 +26,7 @@ langfuse = ["dep:langfuse-ergonomic"]
 
 [dependencies]
 futures = "0.3.31"
-genai-agents = { version = "0.3.1", path = "../genai-agents" }
+genai-agents = { version = "0.3.2", path = "../genai-agents" }
 langfuse-ergonomic = { version = "0.16.0", optional = true }
 regex = "1.11.1"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -37,6 +37,6 @@ thiserror = "2.0.12"
 web-time = "1.1.0"
 
 [dev-dependencies]
-genai-agents = { version = "0.3.1", path = "../genai-agents", features = ["testing"] }
+genai-agents = { version = "0.3.2", path = "../genai-agents", features = ["testing"] }
 mockito = { version = "1.7.0", default-features = false }
 tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread", "time"] }
