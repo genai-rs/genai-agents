@@ -139,6 +139,14 @@ fn runner(config: RunConfig) -> Runner<ScriptedModel> {
     Runner::new(model(), tools).with_config(config)
 }
 
+/// Runs `run` with `capture` as this thread's subscriber.
+///
+/// Every test in this file runs traced, also those that do not look at the spans. tracing
+/// caches, per callsite, whether any subscriber wants it, and works that out from the
+/// subscribers that exist when the callsite is first hit. A test without a subscriber that
+/// hits a callsite first, while another test is still installing its own, can cache "no one
+/// wants it" for that callsite, and the other test then sees none of its spans. With a
+/// subscriber on every test thread, the thread that hits a callsite always has one of its own.
 async fn traced<T>(capture: &Capture, run: impl std::future::Future<Output = T>) -> T {
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
@@ -242,6 +250,14 @@ async fn content_is_recorded_when_asked_for() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_changed_setting_breaks_the_cache() {
+    traced(
+        &Capture::default(),
+        a_changed_setting_breaks_the_cache_untraced(),
+    )
+    .await;
+}
+
+async fn a_changed_setting_breaks_the_cache_untraced() {
     let mut runner = runner(RunConfig::new());
     let mut conversation = Conversation::user("Umbrella?");
     let first = runner.run(&mut conversation).await.unwrap();

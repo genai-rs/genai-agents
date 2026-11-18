@@ -660,9 +660,15 @@ pub fn instruction_files(root: &Path, dir: &Path, budget: usize) -> Result<Strin
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
+        // The same on every platform: the model sees it, and `/` is what it knows.
         let label = file.strip_prefix(&root).map_or_else(
             |_| "AGENTS.md".to_owned(),
-            |path| path.display().to_string(),
+            |path| {
+                path.components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            },
         );
         found.push((label, text.trim().to_owned()));
     }
