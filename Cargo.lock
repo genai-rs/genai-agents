@@ -1573,12 +1573,13 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openai-client-base"
-version = "0.34.1"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3368db7a0e94e1c7e6ada3781a697fb599e098bd1c9efba324225665c9a519d"
+checksum = "5038bf21692dcd46dafdc8a1b028c5b4d79b37d7e26f7e58ae321b427c4a96f5"
 dependencies = [
  "bon",
  "futures-core",
+ "jiff 1.0.1",
  "regex",
  "serde",
  "serde_json",
@@ -1590,9 +1591,9 @@ dependencies = [
 
 [[package]]
 name = "openai-ergonomic"
-version = "0.24.1"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "349fe3cf86e05fa0a5d4867fe7314724d476870bd8fd8b73a2f8678fdccc1e39"
+checksum = "d1407504e942683e8e732121e4e20a7137a2b37ef8472924ce331c7b048e61bf"
 dependencies = [
  "base64 0.23.1",
  "bytes",
