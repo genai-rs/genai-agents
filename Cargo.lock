@@ -258,10 +258,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -1173,14 +1171,28 @@ version = "0.2.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac63a5a611e9d720726d6ab6ee2ee19e6f620503554ea5d303c7cb294ff40c12"
 dependencies = [
- "jiff-core",
- "jiff-static",
+ "jiff-core 0.1.6",
+ "jiff-static 0.2.44",
  "jiff-tzdb-platform",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
  "windows-link",
+]
+
+[[package]]
+name = "jiff"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5d126d72eb017f10b302e73bdeca446bea405ee449af4d9e7866d6b082d83e"
+dependencies = [
+ "jiff-core 1.0.1",
+ "jiff-static 1.0.1",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
 ]
 
 [[package]]
@@ -1193,15 +1205,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "jiff-core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "jiff-static"
 version = "0.2.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f9c27796c21cc8b33ce490f148d53fe41d679b887885bf0ef8f662cdb9b35c0"
 dependencies = [
- "jiff-core",
+ "jiff-core 0.1.6",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0127e9bde3c6130d6169e7d8d68676e4be69c4bf7573c308b6f960a5089c428"
+dependencies = [
+ "jiff-core 1.0.1",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -1291,12 +1324,12 @@ dependencies = [
 
 [[package]]
 name = "langfuse-client-base"
-version = "0.25.0"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a57ca78d192fd67087ea06edd367d9d7601ea2179e3b3c507ecde1a5c2cd4f5"
+checksum = "fc6a1a3aab3851178b2f88c785726c098de3f9b53c63d07fdd605a2695f1e147"
 dependencies = [
  "bon",
- "chrono",
+ "jiff 1.0.1",
  "serde",
  "serde_json",
  "serde_repr",
@@ -1307,17 +1340,17 @@ dependencies = [
 
 [[package]]
 name = "langfuse-ergonomic"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7330ccbe9c2a8d9fec1af0a915aa421baaae251ab0bcc9d0d5a719d95b11465d"
+checksum = "67f49e7f90ef867ab20386f1fd62c8d375dd93a1dffc5de5e7e9e7e00ade29a1"
 dependencies = [
  "base64 0.22.1",
  "bon",
- "chrono",
  "futures-core",
  "futures-util",
  "getrandom 0.4.3",
  "gloo-timers 0.3.0",
+ "jiff 1.0.1",
  "langfuse-client-base",
  "langfuse-ergonomic-macros",
  "pin-project-lite",
@@ -1337,9 +1370,9 @@ dependencies = [
 
 [[package]]
 name = "langfuse-ergonomic-macros"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b3e0b23f9437660c59f7d0691e0fcc9df62840ecf55c0c865e00081ace229da"
+checksum = "a551c1fcb589dfe694136c6f65c17e839262125e0e64ee520e8af23771065634"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2454,7 +2487,7 @@ dependencies = [
  "hex",
  "indexmap 1.9.3",
  "indexmap 2.14.2",
- "jiff",
+ "jiff 0.2.44",
  "schemars 0.9.0",
  "schemars 1.2.3",
  "serde_core",
