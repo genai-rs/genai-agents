@@ -44,7 +44,7 @@ tracing = "0.1.41"
 tokio = { version = "1.45.0", default-features = false, features = ["sync", "time"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-gloo-timers = { version = "0.3.0", features = ["futures"] }
+gloo-timers = { version = "0.4.1", features = ["futures"] }
 web-time = "1.1.0"
 
 [dev-dependencies]
@@ -58,6 +58,6 @@ tracing-subscriber = { version = "0.3.19", default-features = false, features = 
 
 # `tests/wasm.rs`, run in Node.js with wasm-bindgen-test-runner.
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
-gloo-timers = { version = "0.3.0", features = ["futures"] }
+gloo-timers = { version = "0.4.1", features = ["futures"] }
 wasm-bindgen-futures = "0.4.50"
 wasm-bindgen-test = "0.3.50"
