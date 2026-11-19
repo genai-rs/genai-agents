@@ -567,7 +567,7 @@ dependencies = [
  "futures",
  "genai-agents",
  "genai-agents-macros",
- "gloo-timers 0.4.1",
+ "gloo-timers",
  "schemars 1.2.3",
  "serde",
  "serde_json",
@@ -726,18 +726,6 @@ dependencies = [
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "gloo-timers"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
-dependencies = [
- "futures-channel",
- "futures-core",
- "js-sys",
  "wasm-bindgen",
 ]
 
@@ -1295,7 +1283,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "getrandom 0.4.3",
- "gloo-timers 0.4.1",
+ "gloo-timers",
  "jiff 1.0.1",
  "langfuse-client-base",
  "langfuse-ergonomic-macros",
@@ -1519,9 +1507,9 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openai-client-base"
-version = "0.35.0"
+version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5038bf21692dcd46dafdc8a1b028c5b4d79b37d7e26f7e58ae321b427c4a96f5"
+checksum = "0444fd461119f71b62a3f5e817eb4c3bde46277f3cea1adc3ce06453807d09bc"
 dependencies = [
  "bon",
  "futures-core",
@@ -1537,20 +1525,19 @@ dependencies = [
 
 [[package]]
 name = "openai-ergonomic"
-version = "0.25.0"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1407504e942683e8e732121e4e20a7137a2b37ef8472924ce331c7b048e61bf"
+checksum = "b5095940bfcfbc5225a459f0f96907f7835b7792cde7b68b1d8b5637cc086c7b"
 dependencies = [
  "base64",
  "bytes",
  "futures",
- "gloo-timers 0.3.0",
+ "gloo-timers",
  "http",
  "http-body",
  "openai-client-base",
  "opentelemetry",
  "opentelemetry-otlp",
- "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "reqwest",
  "serde",
@@ -1673,12 +1660,6 @@ dependencies = [
  "opentelemetry_sdk",
  "prost",
 ]
-
-[[package]]
-name = "opentelemetry-semantic-conventions"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e62e29dfe041afb8ed2a6c9737ab57db4907285d999ef8ad3a59092a36bdc846"
 
 [[package]]
 name = "opentelemetry_sdk"
@@ -2706,7 +2687,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
- "gloo-timers 0.4.1",
+ "gloo-timers",
  "http",
  "http-body",
  "http-body-util",

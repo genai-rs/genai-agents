@@ -29,7 +29,7 @@ native-tls = ["openai-ergonomic/native-tls"]
 [dependencies]
 futures = "0.3.31"
 genai-agents = { version = "0.3.3", path = "../genai-agents" }
-openai-ergonomic = { version = "0.25.0", default-features = false }
+openai-ergonomic = { version = "0.26.0", default-features = false }
 serde_json = "1.0.140"
 timvw-rust-runtime = { version = "0.4.1", default-features = false, features = ["time"] }
 
