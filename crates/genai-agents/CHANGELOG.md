@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.3.2...genai-agents-v0.3.3) - 2026-11-19
+
+### Other
+
+- *(deps)* gloo-timers 0.4, syn 3, rusqlite 0.43
+
 ## [0.3.2](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.3.1...genai-agents-v0.3.2) - 2026-11-18
 
 ### Fixed

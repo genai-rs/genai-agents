@@ -1,6 +1,6 @@
 [package]
 name = "genai-agents-macros"
-version = "0.1.0"
+version = "0.1.1"
 description = "The #[tool] attribute of genai-agents: a tool from an async function"
 documentation = "https://docs.rs/genai-agents-macros"
 readme = "README.md"
