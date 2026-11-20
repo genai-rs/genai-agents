@@ -1,6 +1,6 @@
 [package]
 name = "genai-agents-openai"
-version = "0.5.0"
+version = "0.6.0"
 description = "The OpenAI provider for genai-agents, on openai-ergonomic"
 documentation = "https://docs.rs/genai-agents-openai"
 readme = "README.md"

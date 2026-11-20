@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/genai-rs/genai-agents/compare/genai-agents-openai-v0.5.0...genai-agents-openai-v0.6.0) - 2026-11-20
+
+### Added
+
+- *(openai)* [**breaking**] openai-ergonomic 0.27
+
 ## [0.5.0](https://github.com/genai-rs/genai-agents/compare/genai-agents-openai-v0.4.1...genai-agents-openai-v0.5.0) - 2026-11-19
 
 ### Added
