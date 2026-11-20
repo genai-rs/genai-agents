@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/genai-rs/genai-agents/compare/genai-agents-mcp-v0.1.3...genai-agents-mcp-v0.1.4) - 2026-11-20
+
+### Other
+
+- updated the following local packages: genai-agents
+
 ## [0.1.3](https://github.com/genai-rs/genai-agents/compare/genai-agents-mcp-v0.1.2...genai-agents-mcp-v0.1.3) - 2026-11-19
 
 ### Other

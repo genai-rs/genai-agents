@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.3.3...genai-agents-v0.3.4) - 2026-11-20
+
+### Fixed
+
+- replace retired OpenAI models with gpt-5.4-mini
+
 ## [0.3.3](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.3.2...genai-agents-v0.3.3) - 2026-11-19
 
 ### Other
