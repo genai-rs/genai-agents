@@ -160,7 +160,7 @@ components:
         model:
           type: string
           description: The assistant's model, and its fallback.
-          example: OpenAI gpt-5-mini, falling back to Ollama qwen2.5:3b
+          example: OpenAI gpt-5.4-mini, falling back to Ollama qwen2.5:3b
         tracing:
           type: boolean
           description: Whether runs are traced to Langfuse.

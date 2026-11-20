@@ -3,6 +3,7 @@
 use std::env;
 
 use genai_agents::fallback::Fallback;
+use genai_agents::Model as _;
 use genai_agents_openai::{Compat, OpenAiChat, OpenAiResponses};
 use openai_ergonomic::{ChatCompletionBuilder, Client, Config, Provider, ResponsesBuilder};
 use opentelemetry::trace::TracerProvider as _;
@@ -15,8 +16,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The model: OpenAI's Responses API when `OPENAI_API_KEY` is set (`DEMO_MODEL`, default
-/// `gpt-5-mini`), with Ollama behind it as a fallback; Ollama alone otherwise
+/// The model: OpenAI's Responses API when `OPENAI_API_KEY` is set (`DEMO_MODEL`, else
+/// `OPENAI_DEFAULT_MODEL`, else openai-ergonomic's default model), with Ollama behind it as a
+/// fallback; Ollama alone otherwise
 /// (`DEMO_OLLAMA_MODEL`, default `qwen2.5:3b`, at `OLLAMA_BASE_URL`). Returns the model and a
 /// line that says which it is.
 pub fn from_env() -> Result<(Fallback, String), BoxError> {
@@ -34,11 +36,17 @@ pub fn from_env() -> Result<(Fallback, String), BoxError> {
     )
     .with_compat(Compat::ollama());
     if env::var("OPENAI_API_KEY").is_ok_and(|key| !key.is_empty()) {
-        let model = env::var("DEMO_MODEL").unwrap_or_else(|_| "gpt-5-mini".into());
-        let openai = OpenAiResponses::new(
-            Client::builder(Config::from_env()?)?.build(),
-            ResponsesBuilder::new(model.clone()),
-        );
+        let client = Client::builder(Config::from_env()?)?.build();
+        let template = match env::var("DEMO_MODEL") {
+            Ok(model) if !model.is_empty() => ResponsesBuilder::new(model),
+            _ => client.responses(),
+        };
+        let openai = OpenAiResponses::new(client, template);
+        let model = openai
+            .info()
+            .origin
+            .map(|origin| origin.model)
+            .unwrap_or_default();
         let label = format!("OpenAI {model}, falling back to Ollama {ollama_model}");
         Ok((Fallback::new(openai).then(ollama), label))
     } else {

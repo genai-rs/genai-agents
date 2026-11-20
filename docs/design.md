@@ -222,7 +222,7 @@ None of the Agents SDK, but each of Codex, pi and OpenClaw needed it: a long run
 ```rust
 let agent = Agent::new("household")
     .instructions("You are a household assistant.")
-    .model(OpenAiResponses::new(client, "gpt-5"))
+    .model(OpenAiResponses::new(client, "gpt-5.4-mini"))
     .tool(Weather)
     .output::<Answer>();
 let outcome = Runner::new().run(&agent, &mut session, &context, "Umbrella in Ghent today?").await?;
