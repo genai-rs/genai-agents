@@ -139,7 +139,7 @@ fn scripted_config(
     let config = Config::builder()
         .api_key("test-key")
         .api_base("https://api.example.test/v1")
-        .default_model("gpt-4.1-mini")
+        .default_model("gpt-5.4-mini")
         .max_retries(0)
         .http_client(timvw_rust_runtime::Client::from_service(service))
         .build();
@@ -159,7 +159,7 @@ fn response(id: &str, output: &[Value]) -> Value {
         "incomplete_details": null,
         "instructions": null,
         "max_output_tokens": null,
-        "model": "gpt-4.1-mini",
+        "model": "gpt-5.4-mini",
         "output": output,
         "parallel_tool_calls": true,
         "previous_response_id": null,
@@ -243,7 +243,7 @@ fn chat_completion(content: Option<&str>, calls: &[(&str, &str, Value)]) -> Valu
         "id": "chatcmpl-1",
         "object": "chat.completion",
         "created": 1_700_000_000,
-        "model": "gpt-4.1-mini",
+        "model": "gpt-5.4-mini",
         "choices": [{
             "index": 0,
             "message": message,
@@ -365,7 +365,7 @@ fn weather_tools() -> ToolRegistry {
 }
 
 fn template() -> ResponsesBuilder {
-    ResponsesBuilder::new("gpt-4.1-mini").instructions("Be brief.")
+    ResponsesBuilder::new("gpt-5.4-mini").instructions("Be brief.")
 }
 
 fn when(log: &Log, name: &str, what: &str) -> Instant {
@@ -433,7 +433,7 @@ async fn the_responses_api_runs_tools_until_the_model_answers() {
         // Stateless defaults, a stable cache key, the template's options.
         for body in seen.iter() {
             assert_eq!(body["store"], false);
-            assert_eq!(body["model"], "gpt-4.1-mini");
+            assert_eq!(body["model"], "gpt-5.4-mini");
             assert_eq!(body["instructions"], "Be brief.");
             assert_eq!(body["parallel_tool_calls"], true);
             assert_eq!(body["prompt_cache_key"], runner.prompt_cache_key().unwrap());
@@ -485,7 +485,7 @@ async fn chat_completions_run_tools_until_the_model_answers() {
         };
         Reply::json(&body).header("x-ratelimit-remaining-tokens", "5000")
     });
-    let template = ChatCompletionBuilder::new("gpt-4.1-mini").system("Be brief.");
+    let template = ChatCompletionBuilder::new("gpt-5.4-mini").system("Be brief.");
     let mut runner = Runner::new(OpenAiChat::new(client, template), weather_tools())
         .with_config(RunConfig::new().with_prompt_cache_key(PromptCacheKey::Custom("k".into())));
     let mut conversation = Conversation::user("Weather in Ghent?");
@@ -589,7 +589,7 @@ async fn failures_before_the_body_are_left_to_the_clients_retries() {
     let config = Config::builder()
         .api_key("test-key")
         .api_base(server.url())
-        .default_model("gpt-4.1-mini")
+        .default_model("gpt-5.4-mini")
         .max_retries(1)
         .build();
     let client = Client::builder(config).unwrap().build();
@@ -814,7 +814,7 @@ async fn deferred_tools_are_loaded_by_the_runners_tool_search() {
         let outcome;
         let loaded: Vec<ToolKey>;
         if chat {
-            let model = OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-4.1-mini"));
+            let model = OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-5.4-mini"));
             let mut runner = Runner::new(model, registry.clone());
             outcome = runner
                 .run(&mut Conversation::user("Convert 10 EUR"))
@@ -987,7 +987,7 @@ async fn an_incomplete_response_ends_the_run() {
         completion["choices"][0]["finish_reason"] = json!("length");
         Reply::json(&completion)
     });
-    let model = OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-4.1-mini"));
+    let model = OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-5.4-mini"));
     let outcome = Runner::new(model, ToolRegistry::new())
         .run(&mut Conversation::user("Write"))
         .await
@@ -1078,7 +1078,7 @@ fn the_run_future_is_send() {
     assert_send(&future);
     drop(future);
     let mut runner = Runner::new(
-        OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-4.1-mini")),
+        OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-5.4-mini")),
         ToolRegistry::new(),
     );
     let future = runner.run_with(&mut conversation, &cancel, |_| {});
@@ -1150,11 +1150,11 @@ async fn requests_go_through_the_clients_interceptors_with_the_settings() {
     let hooks = Hooks::default();
     let model = OpenAiResponses::new(
         client_with(config, &hooks),
-        ResponsesBuilder::new("gpt-5-mini"),
+        ResponsesBuilder::new("gpt-5.4-mini"),
     );
     assert_eq!(
         model.info().origin,
-        Some(Origin::new(RESPONSES_API, PROVIDER, "gpt-5-mini"))
+        Some(Origin::new(RESPONSES_API, PROVIDER, "gpt-5.4-mini"))
     );
     let mut runner = Runner::new(model, weather_tools()).with_config(
         RunConfig::new().with_model_settings(
@@ -1182,29 +1182,33 @@ async fn requests_go_through_the_clients_interceptors_with_the_settings() {
     assert_eq!(
         seen_hooks,
         [
-            "before responses gpt-5-mini",
-            "before responses gpt-5-mini",
+            "before responses gpt-5.4-mini",
+            "before responses gpt-5.4-mini",
             "stream end Some(5)",
             "stream end Some(5)"
         ]
     );
     // The model's items record it as their origin.
     let origin = conversation.calls()[0].meta.origin.clone().unwrap();
-    assert_eq!(origin.model, "gpt-5-mini");
+    assert_eq!(origin.model, "gpt-5.4-mini");
     assert_eq!(origin.api, RESPONSES_API);
 }
 
 #[tokio::test]
 async fn reasoning_of_another_model_is_not_sent() {
     let (client, seen) = scripted(|_, _| Reply::sse(&events("resp_1", &[message("Ok.")])));
-    let model = OpenAiResponses::new(client, ResponsesBuilder::new("gpt-5-mini"))
+    let model = OpenAiResponses::new(client, ResponsesBuilder::new("gpt-5.4-mini"))
         .with_info(ModelInfo::new().with_reasoning(true));
     let mut runner = Runner::new(model, ToolRegistry::new());
     let mut conversation = Conversation::user("Think.");
     conversation.push(
         Reasoning::new(PROVIDER)
             .with_encrypted_content("theirs")
-            .with_meta(ItemMeta::new().with_origin(Origin::new(RESPONSES_API, PROVIDER, "gpt-5"))),
+            .with_meta(ItemMeta::new().with_origin(Origin::new(
+                RESPONSES_API,
+                PROVIDER,
+                "gpt-5.4",
+            ))),
     );
     conversation.push(
         Reasoning::new(PROVIDER)
@@ -1212,7 +1216,7 @@ async fn reasoning_of_another_model_is_not_sent() {
             .with_meta(ItemMeta::new().with_origin(Origin::new(
                 RESPONSES_API,
                 PROVIDER,
-                "gpt-5-mini",
+                "gpt-5.4-mini",
             ))),
     );
     runner.run(&mut conversation).await.unwrap();
@@ -1334,7 +1338,7 @@ async fn calls_of_a_completion_cut_off_at_the_output_limit_are_not_run() {
     let runs = Arc::new(Mutex::new(0));
     let mut tools = ToolRegistry::new();
     tools.register(Counted(Arc::clone(&runs))).unwrap();
-    let model = OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-4.1-mini"));
+    let model = OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-5.4-mini"));
     let mut runner = Runner::new(model, tools);
     let mut conversation = Conversation::user("Weather in Ghent?");
     let outcome = runner.run(&mut conversation).await.unwrap();
@@ -1383,7 +1387,7 @@ async fn instructions_and_structured_output_reach_both_apis() {
 
     // Chat Completions: a first developer (or system) message instead of the template's.
     let (client, seen) = scripted(|_, _| Reply::json(&chat_completion(Some("{}"), &[])));
-    let template = ChatCompletionBuilder::new("gpt-4.1-mini").system("Be brief.");
+    let template = ChatCompletionBuilder::new("gpt-5.4-mini").system("Be brief.");
     let mut runner = Runner::new(
         OpenAiChat::new(client.clone(), template.clone()),
         ToolRegistry::new(),

@@ -224,7 +224,7 @@ pub struct Origin {
     pub api: String,
     /// The provider, such as `openai` or `azure`.
     pub provider: String,
-    /// The model, such as `gpt-5-mini`.
+    /// The model, such as `gpt-5.4-mini`.
     pub model: String,
 }
 

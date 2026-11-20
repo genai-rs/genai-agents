@@ -52,7 +52,7 @@ use crate::{convert, http};
 /// let client = Client::from_env()?.build();
 /// let model = OpenAiResponses::new(
 ///     client,
-///     ResponsesBuilder::new("gpt-5-mini").instructions("You are a household assistant."),
+///     ResponsesBuilder::new("gpt-5.4-mini").instructions("You are a household assistant."),
 /// );
 /// let mut runner = Runner::new(model, ToolRegistry::new());
 /// let outcome = runner.run(&mut Conversation::user("Hello!")).await?;

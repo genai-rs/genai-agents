@@ -41,7 +41,7 @@
 //! let client = Client::from_env()?.build();
 //! let model = OpenAiResponses::new(
 //!     client,
-//!     ResponsesBuilder::new("gpt-5-mini").instructions("You are a household assistant."),
+//!     ResponsesBuilder::new("gpt-5.4-mini").instructions("You are a household assistant."),
 //! );
 //! let mut tools = ToolRegistry::new();
 //! tools.register(Weather)?;

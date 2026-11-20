@@ -45,7 +45,7 @@ pub const CHAT_API: &str = "openai-chat";
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let client = Client::from_env()?.build();
-/// let model = OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-4.1-mini").system("Be brief."));
+/// let model = OpenAiChat::new(client, ChatCompletionBuilder::new("gpt-5.4-mini").system("Be brief."));
 /// let mut runner = Runner::new(model, ToolRegistry::new());
 /// let outcome = runner.run(&mut Conversation::user("Hello!")).await?;
 /// println!("{}", outcome.output_text());

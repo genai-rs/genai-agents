@@ -31,7 +31,7 @@ eval reports and the baseline are in `workspace/.demo/`.
 | Variable | What it does |
 | --- | --- |
 | `OPENAI_API_KEY` | use OpenAI's Responses API, with Ollama as the fallback |
-| `DEMO_MODEL` | the OpenAI model (default `gpt-5-mini`) |
+| `DEMO_MODEL` | the OpenAI model (default: `OPENAI_DEFAULT_MODEL`, else openai-ergonomic's default model) |
 | `DEMO_OLLAMA_MODEL`, `OLLAMA_BASE_URL` | the Ollama model (default `qwen2.5:3b`) and server (default `http://localhost:11434/v1`) |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` | send the spans to Langfuse (default host: Langfuse Cloud) |
 | `DEMO_WORKSPACE` | another directory to work on |
@@ -59,7 +59,7 @@ is not there. What still fails is mostly the date format `AGENTS.md` asks for.
 
 With OpenAI's `gpt-5-mini` (and three trials a case), every answer was right and 80 % of the trials passed; the one
 miss was the eval's: it wanted `list_files` for "which notes do we have?", and the model found the names with `search`.
-That case now takes any lookup.
+That case now takes any lookup. With `gpt-5.4-mini`, which replaced it as the default, all fifteen trials passed.
 
 ## The web page
 
