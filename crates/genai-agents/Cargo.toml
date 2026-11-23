@@ -33,15 +33,15 @@ macros = ["schemars", "dep:genai-agents-macros"]
 [dependencies]
 futures = "0.3.31"
 genai-agents-macros = { version = "0.1.1", path = "../genai-agents-macros", optional = true }
-schemars = { version = "1.0.4", optional = true }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-thiserror = "2.0.12"
-tokio = { version = "1.45.0", default-features = false, features = ["sync"] }
+schemars = { version = "1.2.3", optional = true }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", default-features = false, features = ["sync"] }
 tracing = "0.1.41"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-tokio = { version = "1.45.0", default-features = false, features = ["sync", "time"] }
+tokio = { version = "1.54.1", default-features = false, features = ["sync", "time"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 gloo-timers = { version = "0.4.1", features = ["futures"] }
@@ -50,10 +50,10 @@ web-time = "1.1.0"
 [dev-dependencies]
 # The crate itself with `testing`, for its own tests, and `macros`, for the tools guide.
 genai-agents = { path = ".", features = ["testing", "macros"] }
-schemars = "1.0.4"
+schemars = "1.2.3"
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-tokio = { version = "1.45.0", features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio = { version = "1.54.1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["registry"] }
 
 # `tests/wasm.rs`, run in Node.js with wasm-bindgen-test-runner.
