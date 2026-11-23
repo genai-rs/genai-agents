@@ -1737,9 +1737,9 @@ dependencies = [
 
 [[package]]
 name = "openai-ergonomic"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df28de620ba180de41b3da80e32f6c0f18dd1d0b1ee126f5ebbb5bf4f3ea89fb"
+checksum = "e4c20eaee132b93a71e44ed5bc9ffbdc48b24420a74165518baa3cbf0edd7349"
 dependencies = [
  "base64",
  "bytes",
