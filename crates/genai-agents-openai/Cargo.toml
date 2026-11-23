@@ -27,11 +27,11 @@ rustls-tls = ["openai-ergonomic/rustls-tls"]
 native-tls = ["openai-ergonomic/native-tls"]
 
 [dependencies]
-futures = "0.3.31"
+futures = "0.3.34"
 genai-agents = { version = "0.3.4", path = "../genai-agents" }
 openai-ergonomic = { version = "0.27.0", default-features = false }
 serde_json = "1.0.154"
-timvw-rust-runtime = { version = "0.4.1", default-features = false, features = ["time"] }
+timvw-rust-runtime = { version = "0.4.2", default-features = false, features = ["time"] }
 
 [dev-dependencies]
 bytes = "1.12.2"
@@ -43,7 +43,7 @@ opentelemetry = "0.33.1"
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
 opentelemetry_sdk = "0.33.1"
 tracing-opentelemetry = "0.34.0"
-tracing-subscriber = { version = "0.3.19", default-features = false, features = ["registry"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
-tower = { version = "0.5.2", features = ["util"] }
+tower = { version = "0.5.3", features = ["util"] }

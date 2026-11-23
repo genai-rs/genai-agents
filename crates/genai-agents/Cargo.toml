@@ -31,14 +31,14 @@ testing = []
 macros = ["schemars", "dep:genai-agents-macros"]
 
 [dependencies]
-futures = "0.3.31"
+futures = "0.3.34"
 genai-agents-macros = { version = "0.1.1", path = "../genai-agents-macros", optional = true }
 schemars = { version = "1.2.3", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false, features = ["sync"] }
-tracing = "0.1.41"
+tracing = "0.1.44"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio = { version = "1.54.1", default-features = false, features = ["sync", "time"] }
@@ -54,10 +54,10 @@ schemars = "1.2.3"
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tokio = { version = "1.54.1", features = ["macros", "rt", "rt-multi-thread", "time"] }
-tracing-subscriber = { version = "0.3.19", default-features = false, features = ["registry"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
 
 # `tests/wasm.rs`, run in Node.js with wasm-bindgen-test-runner.
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 gloo-timers = { version = "0.4.1", features = ["futures"] }
-wasm-bindgen-futures = "0.4.50"
-wasm-bindgen-test = "0.3.50"
+wasm-bindgen-futures = "0.4.80"
+wasm-bindgen-test = "0.3.80"

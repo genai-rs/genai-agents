@@ -30,6 +30,6 @@ opentelemetry_sdk = { version = "0.33.1", features = ["rt-tokio", "experimental_
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "net", "signal", "sync"] }
-tracing = "0.1.41"
+tracing = "0.1.44"
 tracing-opentelemetry = "0.34.0"
-tracing-subscriber = { version = "0.3.19", default-features = false, features = ["registry"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
