@@ -21,10 +21,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 genai-agents = { version = "0.3.4", path = "../genai-agents" }
-serde_json = "1.0.140"
+serde_json = "1.0.154"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
-tokio = { version = "1.45.0", default-features = false, features = ["rt"] }
+tokio = { version = "1.54.1", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
 genai-agents = { version = "0.3.4", path = "../genai-agents", features = ["testing"] }
-tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
