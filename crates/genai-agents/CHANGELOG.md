@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.3.4...genai-agents-v0.3.5) - 2026-11-23
+
+### Other
+
+- *(deps)* Update pre-1.0 Rust updates
+- *(deps)* Update rust patch updates
+
 ## [0.3.4](https://github.com/genai-rs/genai-agents/compare/genai-agents-v0.3.3...genai-agents-v0.3.4) - 2026-11-20
 
 ### Fixed
