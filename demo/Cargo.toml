@@ -24,7 +24,7 @@ genai-agents-eval = { path = "../crates/genai-agents-eval" }
 genai-agents-openai = { path = "../crates/genai-agents-openai" }
 genai-agents-sqlite = { path = "../crates/genai-agents-sqlite" }
 openai-client-base = { version = "0.37.0", default-features = false, features = ["rustls", "retry", "live"] }
-openai-ergonomic = { version = "0.27.0", default-features = false, features = ["rustls-tls", "otel"] }
+openai-ergonomic = { version = "0.28.0", default-features = false, features = ["rustls-tls", "otel"] }
 opentelemetry = "0.33.1"
 opentelemetry_sdk = { version = "0.33.1", features = ["rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime"] }
 serde = { version = "1.0.229", features = ["derive"] }
